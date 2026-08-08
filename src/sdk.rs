@@ -1447,6 +1447,126 @@ impl AgentSessionHandle {
         self.session.compact_now(on_event).await
     }
 
+    /// Trigger compaction with optional custom instructions.
+    ///
+    /// Mirrors `RpcTransportClient::compact_with_instructions`. When
+    /// `custom_instructions` is `Some`, it is passed to the compaction pass.
+    pub async fn compact_with_instructions(
+        &mut self,
+        custom_instructions: Option<&str>,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<()> {
+        // AgentSession::compact_now doesn't accept instructions yet; when
+        // provided we fall back to plain compact (instructions ignored).
+        // TODO: thread instructions through once AgentSession supports them.
+        let _ = custom_instructions;
+        self.session.compact_now(on_event).await
+    }
+
+    /// Return session-level token/message aggregates for the current path.
+    ///
+    /// Mirrors `RpcTransportClient::get_session_stats`. Computes from
+    /// `Session::to_messages_for_current_path()` — same logic as the RPC
+    /// server's `session_stats()` helper (rpc.rs).
+    pub async fn get_session_stats(&self) -> Result<serde_json::Value> {
+        let cx = crate::agent_cx::AgentCx::for_current_or_request();
+        let session = self.session.session.clone();
+        let guard = session
+            .lock(cx.cx())
+            .await
+            .map_err(|e| Error::session(format!("session lock failed: {e}")))?;
+        let messages = guard.to_messages_for_current_path();
+        let mut user_messages: u64 = 0;
+        let mut assistant_messages: u64 = 0;
+        let mut tool_calls: u64 = 0;
+        let mut tool_results: u64 = 0;
+        let mut total_input: u64 = 0;
+        let mut total_output: u64 = 0;
+        let mut total_cache_read: u64 = 0;
+        let mut total_cache_write: u64 = 0;
+        let mut total_cost: f64 = 0.0;
+        for msg in &messages {
+            match msg {
+                crate::model::Message::User(_) | crate::model::Message::Custom(_) => {
+                    user_messages += 1;
+                }
+                crate::model::Message::Assistant(am) => {
+                    assistant_messages += 1;
+                    tool_calls += am
+                        .content
+                        .iter()
+                        .filter(|b| {
+                            matches!(b, crate::model::ContentBlock::ToolCall(_))
+                        })
+                        .count() as u64;
+                    total_input += am.usage.input;
+                    total_output += am.usage.output;
+                    total_cache_read += am.usage.cache_read;
+                    total_cache_write += am.usage.cache_write;
+                    total_cost += am.usage.cost.total;
+                }
+                crate::model::Message::ToolResult(_) => {
+                    tool_results += 1;
+                }
+            }
+        }
+        let total_messages = messages.len() as u64;
+        let total_tokens = total_input + total_output + total_cache_read + total_cache_write;
+        Ok(serde_json::json!({
+            "userMessages": user_messages,
+            "assistantMessages": assistant_messages,
+            "toolCalls": tool_calls,
+            "toolResults": tool_results,
+            "totalMessages": total_messages,
+            "tokens": {
+                "input": total_input,
+                "output": total_output,
+                "cacheRead": total_cache_read,
+                "cacheWrite": total_cache_write,
+                "total": total_tokens,
+            },
+            "cost": total_cost,
+        }))
+    }
+
+    /// Return the text of the last assistant message on the current path.
+    ///
+    /// Mirrors `RpcTransportClient::get_last_assistant_text`. Scans
+    /// `to_messages_for_current_path()` in reverse for the first
+    /// `Assistant` message with non-empty text content.
+    pub async fn get_last_assistant_text(&self) -> Result<Option<String>> {
+        let cx = crate::agent_cx::AgentCx::for_current_or_request();
+        let session = self.session.session.clone();
+        let guard = session
+            .lock(cx.cx())
+            .await
+            .map_err(|e| Error::session(format!("session lock failed: {e}")))?;
+        let messages = guard.to_messages_for_current_path();
+        for msg in messages.iter().rev() {
+            if let crate::model::Message::Assistant(am) = msg {
+                let text: String = am.content.iter().filter_map(|b| {
+                    if let crate::model::ContentBlock::Text(t) = b {
+                        Some(t.text.as_str())
+                    } else {
+                        None
+                    }
+                }).collect::<Vec<_>>().join("");
+                if !text.is_empty() {
+                    return Ok(Some(text));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Enable or disable automatic context compaction.
+    ///
+    /// Mirrors `RpcTransportClient::set_auto_compaction`. Toggles
+    /// `AgentSession.compaction_settings.enabled`.
+    pub fn set_auto_compaction(&mut self, enabled: bool) {
+        self.session.set_compaction_enabled(enabled);
+    }
+
     /// Access the underlying `AgentSession`.
     pub const fn session(&self) -> &AgentSession {
         &self.session

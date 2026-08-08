@@ -8322,6 +8322,11 @@ impl AgentSession {
         self.compaction_settings.context_window_tokens = context_window_tokens;
     }
 
+    /// Enable or disable automatic context compaction.
+    pub fn set_compaction_enabled(&mut self, enabled: bool) {
+        self.compaction_settings.enabled = enabled;
+    }
+
     pub async fn set_provider_model(&mut self, provider_id: &str, model_id: &str) -> Result<()> {
         let already_active = {
             let provider = self.agent.provider();
