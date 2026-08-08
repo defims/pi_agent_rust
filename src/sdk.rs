@@ -1449,7 +1449,7 @@ impl AgentSessionHandle {
 
     /// Trigger compaction with optional custom instructions.
     ///
-    /// Mirrors `RpcTransportClient::compact_with_instructions`. When
+    /// Mirrors TS SDK `AgentSession.compactWithInstructions` (earendil-works/pi). When
     /// `custom_instructions` is `Some`, it is passed to the compaction pass.
     pub async fn compact_with_instructions(
         &mut self,
@@ -1465,7 +1465,7 @@ impl AgentSessionHandle {
 
     /// Return session-level token/message aggregates for the current path.
     ///
-    /// Mirrors `RpcTransportClient::get_session_stats`. Computes from
+    /// Mirrors TS SDK `AgentSession.getSessionStats` (earendil-works/pi). Computes from
     /// `Session::to_messages_for_current_path()` — same logic as the RPC
     /// server's `session_stats()` helper (rpc.rs).
     pub async fn get_session_stats(&self) -> Result<serde_json::Value> {
@@ -1531,7 +1531,7 @@ impl AgentSessionHandle {
 
     /// Return the text of the last assistant message on the current path.
     ///
-    /// Mirrors `RpcTransportClient::get_last_assistant_text`. Scans
+    /// Mirrors TS SDK `AgentSession.getLastAssistantText` (earendil-works/pi). Scans
     /// `to_messages_for_current_path()` in reverse for the first
     /// `Assistant` message with non-empty text content.
     pub async fn get_last_assistant_text(&self) -> Result<Option<String>> {
@@ -1561,7 +1561,7 @@ impl AgentSessionHandle {
 
     /// Enable or disable automatic context compaction.
     ///
-    /// Mirrors `RpcTransportClient::set_auto_compaction`. Toggles
+    /// Mirrors TS SDK `AgentSession.setAutoCompactionEnabled` (earendil-works/pi). Toggles
     /// `AgentSession.compaction_settings.enabled`.
     pub fn set_auto_compaction(&mut self, enabled: bool) {
         self.session.set_compaction_enabled(enabled);
@@ -1569,7 +1569,7 @@ impl AgentSessionHandle {
 
     /// Execute a bash command in the session's working directory.
     ///
-    /// Mirrors `RpcTransportClient::bash`. Spawns a shell subprocess, captures
+    /// Mirrors TS SDK `AgentSession.bash` (earendil-works/pi). Spawns a shell subprocess, captures
     /// output (with overflow spill to temp file), and supports abort via the
     /// returned [`BashHandle`]. The caller is responsible for abort lifecycle.
     ///
@@ -1604,7 +1604,7 @@ impl AgentSessionHandle {
 
     /// List all models available in the session's model registry.
     ///
-    /// Mirrors `RpcTransportClient::get_available_models`. Reads from
+    /// Mirrors TS SDK `AgentSession.getAvailableModels` (earendil-works/pi). Reads from
     /// `AgentSession.model_registry` (loaded at session creation).
     pub fn get_available_models(&self) -> Vec<String> {
         self.session
@@ -1620,7 +1620,7 @@ impl AgentSessionHandle {
 
     /// Set the steering queue mode (e.g. "always", "branch").
     ///
-    /// Mirrors `RpcTransportClient::set_steering_mode`. Controls how steering
+    /// Mirrors TS SDK `AgentSession.setSteeringMode` (earendil-works/pi). Controls how steering
     /// messages are queued. Requires the extension queue system to be active.
     pub fn set_steering_mode(&mut self, mode: &str) -> Result<()> {
         let mode = crate::agent::QueueMode::from_str(mode)
@@ -1634,7 +1634,7 @@ impl AgentSessionHandle {
 
     /// Set the follow-up queue mode.
     ///
-    /// Mirrors `RpcTransportClient::set_follow_up_mode`.
+    /// Mirrors TS SDK `AgentSession.setFollowUpMode` (earendil-works/pi).
     pub fn set_follow_up_mode(&mut self, mode: &str) -> Result<()> {
         let mode = crate::agent::QueueMode::from_str(mode)
             .ok_or_else(|| Error::api(format!("Unknown follow-up mode: {mode}")))?;
@@ -1643,17 +1643,17 @@ impl AgentSessionHandle {
         Ok(())
     }
 
-    // ── RPC-name aliases (对齐 RpcTransportClient 方法名,in_process 调用方可混用) ──
+    // ── TS SDK-name aliases (对齐 earendil-works/pi AgentSession 方法名) ──
     // abort 不加 alias:in_process 的 abort 必须通过 new_abort_handle() 预建
-    // AbortHandle + AbortSignal(不像 RPC 可直接发命令),语义不同。
+    // AbortHandle + AbortSignal(不像 TS SDK 可直接调 abort()),语义不同。
 
     /// Get all messages on the current path. Alias matching
-    /// `RpcTransportClient::get_messages`.
+    /// TS SDK `AgentSession.getMessages`.
     pub async fn get_messages(&self) -> Result<Vec<Message>> {
         self.messages().await
     }
 
-    /// Get session state. Alias matching `RpcTransportClient::get_state`.
+    /// Get session state. Alias matching TS SDK `AgentSession.getState`.
     pub async fn get_state(&self) -> Result<AgentSessionState> {
         self.state().await
     }
