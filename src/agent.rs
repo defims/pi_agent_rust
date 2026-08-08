@@ -806,15 +806,6 @@ impl QueueMode {
             Self::OneAtATime => "one-at-a-time",
         }
     }
-
-    /// Parse from string (inverse of `as_str`).
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "all" => Some(Self::All),
-            "one-at-a-time" => Some(Self::OneAtATime),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8334,11 +8325,6 @@ impl AgentSession {
     /// Enable or disable automatic context compaction.
     pub fn set_compaction_enabled(&mut self, enabled: bool) {
         self.compaction_settings.enabled = enabled;
-    }
-
-    /// Access the model registry (if loaded).
-    pub fn model_registry(&self) -> Option<&crate::models::ModelRegistry> {
-        self.model_registry.as_ref()
     }
 
     pub async fn set_provider_model(&mut self, provider_id: &str, model_id: &str) -> Result<()> {

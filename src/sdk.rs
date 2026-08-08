@@ -1602,62 +1602,6 @@ impl AgentSessionHandle {
         })
     }
 
-    /// List all models available in the session's model registry.
-    ///
-    /// Mirrors TS SDK `AgentSession.getAvailableModels` (earendil-works/pi). Reads from
-    /// `AgentSession.model_registry` (loaded at session creation).
-    pub fn get_available_models(&self) -> Vec<String> {
-        self.session
-            .model_registry()
-            .map(|reg| {
-                reg.models()
-                    .iter()
-                    .map(|m| format!("{}/{}", m.model.provider, m.model.id))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Set the steering queue mode (e.g. "always", "branch").
-    ///
-    /// Mirrors TS SDK `AgentSession.setSteeringMode` (earendil-works/pi). Controls how steering
-    /// messages are queued. Requires the extension queue system to be active.
-    pub fn set_steering_mode(&mut self, mode: &str) -> Result<()> {
-        let mode = crate::agent::QueueMode::from_str(mode)
-            .ok_or_else(|| Error::api(format!("Unknown steering mode: {mode}")))?;
-        // AgentSession::set_queue_modes 同步 agent + extension_queue_modes。
-        // follow_up 保持当前值(读不到时默认 All)。
-        let follow_up = crate::agent::QueueMode::All;
-        self.session.set_queue_modes(mode, follow_up);
-        Ok(())
-    }
-
-    /// Set the follow-up queue mode.
-    ///
-    /// Mirrors TS SDK `AgentSession.setFollowUpMode` (earendil-works/pi).
-    pub fn set_follow_up_mode(&mut self, mode: &str) -> Result<()> {
-        let mode = crate::agent::QueueMode::from_str(mode)
-            .ok_or_else(|| Error::api(format!("Unknown follow-up mode: {mode}")))?;
-        let steering = crate::agent::QueueMode::All;
-        self.session.set_queue_modes(steering, mode);
-        Ok(())
-    }
-
-    // ── TS SDK-name aliases (对齐 earendil-works/pi AgentSession 方法名) ──
-    // abort 不加 alias:in_process 的 abort 必须通过 new_abort_handle() 预建
-    // AbortHandle + AbortSignal(不像 TS SDK 可直接调 abort()),语义不同。
-
-    /// Get all messages on the current path. Alias matching
-    /// TS SDK `AgentSession.getMessages`.
-    pub async fn get_messages(&self) -> Result<Vec<Message>> {
-        self.messages().await
-    }
-
-    /// Get session state. Alias matching TS SDK `AgentSession.getState`.
-    pub async fn get_state(&self) -> Result<AgentSessionState> {
-        self.state().await
-    }
-
     /// Access the underlying `AgentSession`.
     pub const fn session(&self) -> &AgentSession {
         &self.session
