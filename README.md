@@ -1,3 +1,14 @@
+> **Fork 定位**:这是 [earendil-works/pi](https://github.com/earendil-works/pi)
+> (TypeScript SDK `@earendil-works/pi-coding-agent`) 的 **Rust 版本**,持续跟随上游。
+>
+> 本 fork 在 `AgentSessionHandle`(in_process 路径)上补齐 TS SDK `AgentSessionLike`
+> 接口的等价方法(get_session_stats/get_last_assistant_text/set_auto_compaction/
+> compact_with_instructions/bash 等),让 Rust 引擎的能力与 TS 原版 SDK 对齐。
+>
+> 对齐进度详见 [sdk-mapping.md](docs/sdk-mapping.md)。
+
+---
+
 <p align="center">
   <img src="pi_agent_rust_illustration.webp" alt="Pi Agent Rust" width="600"/>
 </p>
