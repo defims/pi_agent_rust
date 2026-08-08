@@ -1643,6 +1643,21 @@ impl AgentSessionHandle {
         Ok(())
     }
 
+    // ── RPC-name aliases (对齐 RpcTransportClient 方法名,in_process 调用方可混用) ──
+    // abort 不加 alias:in_process 的 abort 必须通过 new_abort_handle() 预建
+    // AbortHandle + AbortSignal(不像 RPC 可直接发命令),语义不同。
+
+    /// Get all messages on the current path. Alias matching
+    /// `RpcTransportClient::get_messages`.
+    pub async fn get_messages(&self) -> Result<Vec<Message>> {
+        self.messages().await
+    }
+
+    /// Get session state. Alias matching `RpcTransportClient::get_state`.
+    pub async fn get_state(&self) -> Result<AgentSessionState> {
+        self.state().await
+    }
+
     /// Access the underlying `AgentSession`.
     pub const fn session(&self) -> &AgentSession {
         &self.session
