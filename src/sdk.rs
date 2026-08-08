@@ -1567,6 +1567,82 @@ impl AgentSessionHandle {
         self.session.set_compaction_enabled(enabled);
     }
 
+    /// Execute a bash command in the session's working directory.
+    ///
+    /// Mirrors `RpcTransportClient::bash`. Spawns a shell subprocess, captures
+    /// output (with overflow spill to temp file), and supports abort via the
+    /// returned [`BashHandle`]. The caller is responsible for abort lifecycle.
+    ///
+    /// Note: unlike the RPC path, this does NOT automatically append a
+    /// `BashExecution` entry to the session — the caller decides whether to
+    /// persist (via `session_mut().session.lock().append_message(...)`).
+    pub async fn bash(
+        &mut self,
+        command: &str,
+        abort_rx: asupersync::channel::oneshot::Receiver<()>,
+    ) -> Result<RpcBashResult> {
+        let cx = crate::agent_cx::AgentCx::for_current_or_request();
+        let cwd = self
+            .session
+            .session
+            .lock(cx.cx())
+            .await
+            .map_err(|e| Error::session(format!("session lock failed: {e}")))?
+            .header
+            .cwd
+            .clone();
+        let cwd = std::path::PathBuf::from(&cwd);
+        let result = crate::rpc::run_bash_rpc(&cwd, command, abort_rx).await?;
+        Ok(RpcBashResult {
+            output: result.output,
+            exit_code: result.exit_code,
+            cancelled: result.cancelled,
+            truncated: result.truncated,
+            full_output_path: result.full_output_path,
+        })
+    }
+
+    /// List all models available in the session's model registry.
+    ///
+    /// Mirrors `RpcTransportClient::get_available_models`. Reads from
+    /// `AgentSession.model_registry` (loaded at session creation).
+    pub fn get_available_models(&self) -> Vec<String> {
+        self.session
+            .model_registry()
+            .map(|reg| {
+                reg.models()
+                    .iter()
+                    .map(|m| format!("{}/{}", m.model.provider, m.model.id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Set the steering queue mode (e.g. "always", "branch").
+    ///
+    /// Mirrors `RpcTransportClient::set_steering_mode`. Controls how steering
+    /// messages are queued. Requires the extension queue system to be active.
+    pub fn set_steering_mode(&mut self, mode: &str) -> Result<()> {
+        let mode = crate::agent::QueueMode::from_str(mode)
+            .ok_or_else(|| Error::api(format!("Unknown steering mode: {mode}")))?;
+        // AgentSession::set_queue_modes 同步 agent + extension_queue_modes。
+        // follow_up 保持当前值(读不到时默认 All)。
+        let follow_up = crate::agent::QueueMode::All;
+        self.session.set_queue_modes(mode, follow_up);
+        Ok(())
+    }
+
+    /// Set the follow-up queue mode.
+    ///
+    /// Mirrors `RpcTransportClient::set_follow_up_mode`.
+    pub fn set_follow_up_mode(&mut self, mode: &str) -> Result<()> {
+        let mode = crate::agent::QueueMode::from_str(mode)
+            .ok_or_else(|| Error::api(format!("Unknown follow-up mode: {mode}")))?;
+        let steering = crate::agent::QueueMode::All;
+        self.session.set_queue_modes(steering, mode);
+        Ok(())
+    }
+
     /// Access the underlying `AgentSession`.
     pub const fn session(&self) -> &AgentSession {
         &self.session
