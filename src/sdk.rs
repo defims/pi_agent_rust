@@ -54,6 +54,8 @@ pub use crate::provider::{
     ThinkingBudgets as ProviderThinkingBudgets, ToolDef,
 };
 pub use crate::session::Session;
+pub use crate::session::{build_session_context, SessionContextSnapshot};
+pub use crate::session_index::{SessionIndex, SessionMeta};
 pub use crate::tools::{Tool, ToolOutput, ToolRegistry, ToolUpdate};
 
 /// Stable alias for model-exposed tool schema definitions.

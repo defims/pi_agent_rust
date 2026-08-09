@@ -5610,6 +5610,7 @@ impl SessionPickEntry {
             last_modified_ms: self.last_modified_ms,
             size_bytes: self.size_bytes,
             name: self.name.clone(),
+            ..Default::default()
         }
     }
 }
@@ -6233,6 +6234,137 @@ pub struct CustomEntry {
     pub custom_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+}
+
+// ============================================================================
+// Free-function build_session_context (TS SDK SessionManager.buildSessionContext)
+// ============================================================================
+
+/// `buildSessionContext` 的返回值,对齐 TS `{ messages, thinkingLevel, model }`。
+#[derive(Debug, Clone)]
+pub struct SessionContextSnapshot {
+    pub messages: Vec<Message>,
+    pub thinking_level: Option<String>,
+    pub model: Option<(String, String)>,
+}
+
+/// 对齐 TS SDK `buildSessionContext(entries, leafId, byId)`。
+///
+/// 从 leaf→root 走 `parentId` 构建 branch path,提取最后 thinking_level/model/compaction,
+/// 按有无 compaction 拼接消息(compaction 摘要 + firstKeptEntryId 之后 entries)。
+pub fn build_session_context(
+    entries: &[SessionEntry],
+    leaf_id: Option<&str>,
+    by_id: &std::collections::HashMap<String, usize>,
+) -> SessionContextSnapshot {
+    let leaf_idx = match leaf_id {
+        None => return SessionContextSnapshot { messages: Vec::new(), thinking_level: None, model: None },
+        Some(id) => by_id.get(id).copied(),
+    };
+    let leaf_idx = leaf_idx.or_else(|| entries.len().checked_sub(1));
+    let Some(leaf_idx) = leaf_idx else {
+        return SessionContextSnapshot { messages: Vec::new(), thinking_level: None, model: None };
+    };
+
+    let mut path_indices = Vec::with_capacity(16);
+    let mut visited = std::collections::HashSet::new();
+    let mut current = Some(leaf_idx);
+    while let Some(idx) = current {
+        if !visited.insert(idx) { break; }
+        path_indices.push(idx);
+        let parent_id = entries.get(idx).and_then(|e| e.base().parent_id.as_deref());
+        current = parent_id.and_then(|pid| by_id.get(pid).copied());
+    }
+    path_indices.reverse();
+
+    let mut thinking_level = None;
+    let mut model = None;
+    let mut last_compaction_pos = None;
+    for (path_pos, &idx) in path_indices.iter().enumerate() {
+        let Some(entry) = entries.get(idx) else { continue };
+        match entry {
+            SessionEntry::ThinkingLevelChange(tc) => thinking_level = Some(tc.thinking_level.clone()),
+            SessionEntry::ModelChange(mc) => model = Some((mc.provider.clone(), mc.model_id.clone())),
+            SessionEntry::Message(msg) => {
+                if let SessionMessage::Assistant { message } = &msg.message {
+                    model = Some((message.provider.clone(), message.model.clone()));
+                }
+            }
+            SessionEntry::Compaction(_) => last_compaction_pos = Some(path_pos),
+            _ => {}
+        }
+    }
+
+    let path_len = path_indices.len();
+    let entry_at = |i: usize| &entries[path_indices[i]];
+    let messages = build_context_messages(path_len, last_compaction_pos, entry_at);
+
+    SessionContextSnapshot { messages, thinking_level, model }
+}
+
+fn build_context_messages<'a, F>(path_len: usize, compaction_path_pos: Option<usize>, entry_at: F) -> Vec<Message>
+where
+    F: Fn(usize) -> &'a SessionEntry,
+{
+    if let Some(compaction_pos) = compaction_path_pos {
+        let SessionEntry::Compaction(compaction) = entry_at(compaction_pos) else {
+            return Vec::new();
+        };
+        let mut messages = Vec::with_capacity(path_len);
+        let summary_message = SessionMessage::CompactionSummary {
+            summary: compaction.summary.clone(),
+            tokens_before: compaction.tokens_before,
+        };
+        if let Some(message) = session_message_to_model(&summary_message) {
+            messages.push(message);
+        }
+        let has_kept_entry = (0..path_len).any(|idx| {
+            entry_at(idx).base_id().is_some_and(|id| id.eq(&compaction.first_kept_entry_id))
+        });
+        let mut keep = false;
+        let mut past_compaction = false;
+        for idx in 0..path_len {
+            let entry = entry_at(idx);
+            if idx == compaction_pos { past_compaction = true; }
+            if !keep {
+                if has_kept_entry {
+                    if entry.base_id().is_some_and(|id| id.eq(&compaction.first_kept_entry_id)) {
+                        keep = true;
+                    } else { continue; }
+                } else if past_compaction {
+                    keep = true;
+                } else { continue; }
+            }
+            append_context_message(&mut messages, entry);
+        }
+        messages
+    } else {
+        let mut messages = Vec::with_capacity(path_len);
+        for idx in 0..path_len {
+            append_context_message(&mut messages, entry_at(idx));
+        }
+        messages
+    }
+}
+
+fn append_context_message(messages: &mut Vec<Message>, entry: &SessionEntry) {
+    match entry {
+        SessionEntry::Message(msg_entry) => {
+            if let Some(message) = session_message_to_model(&msg_entry.message) {
+                messages.push(message);
+            }
+        }
+        SessionEntry::BranchSummary(summary) => {
+            let summary_message = SessionMessage::BranchSummary {
+                summary: summary.summary.clone(),
+                from_id: summary.from_id.clone(),
+            };
+            if let Some(message) = session_message_to_model(&summary_message) {
+                messages.push(message);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ============================================================================
@@ -12705,6 +12837,7 @@ mod tests {
             last_modified_ms: 0,
             size_bytes: 16,
             name: Some("guarded".to_string()),
+            ..Default::default()
         };
 
         let (entries, missing_paths) = split_indexed_session_entries(vec![meta]);
