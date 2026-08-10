@@ -1801,24 +1801,39 @@ fn build_stream_options_with_optional_key(
 
 /// Create a fully configured embeddable agent session.
 ///
-/// This is the programmatic entrypoint for non-CLI consumers that want to run
-/// Pi sessions in-process.
-#[allow(clippy::too_many_lines)]
-pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessionHandle> {
+/// Cwd-bound runtime services bundle (对齐 TS `AgentSessionServices`).
+///
+/// Contains everything needed to query models/auth/settings without creating
+/// a Session. Use `create_agent_session_from_services` to build a full session
+/// from this bundle.
+///
+/// ⏭️ Missing vs TS: `settingsManager`, `resourceLoader` (extension system,
+/// architectural difference).
+pub struct AgentSessionServices {
+    pub cwd: std::path::PathBuf,
+    pub global_dir: std::path::PathBuf,
+    pub config: Config,
+    pub auth: crate::auth::AuthStorage,
+    pub model_registry: ModelRegistry,
+    pub diagnostics: Vec<String>,
+    /// CLI args derived from SessionOptions (consumed by from_services).
+    pub(crate) cli: Cli,
+}
+
+/// 对齐 TS `createAgentSessionServices`:build cwd-bound services without a Session.
+///
+/// Loads Config, AuthStorage (refreshes OAuth), ModelRegistry. Returns a bundle
+/// that can be used for model listing, credential queries, or passed to
+/// `create_agent_session_from_services`.
+pub async fn create_agent_session_services(
+    options: &SessionOptions,
+) -> Result<AgentSessionServices> {
     let process_cwd =
         std::env::current_dir().map_err(|e| Error::config(format!("cwd lookup failed: {e}")))?;
     let cwd = options.working_directory.as_deref().map_or_else(
         || process_cwd.clone(),
         |path| resolve_path_for_cwd(path, &process_cwd),
     );
-    let resolved_session_path = options
-        .session_path
-        .as_deref()
-        .map(|path| resolve_path_for_cwd(path, &cwd));
-    let resolved_session_dir = options
-        .session_dir
-        .as_deref()
-        .map(|path| resolve_path_for_cwd(path, &cwd));
 
     let mut cli = Cli::try_parse_from(["pi"])
         .map_err(|e| Error::validation(format!("CLI init failed: {e}")))?;
@@ -1830,12 +1845,14 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     cli.append_system_prompt = options.append_system_prompt.clone();
     cli.hide_cwd_in_prompt = !options.include_cwd_in_prompt;
     cli.thinking = options.thinking.map(|t| t.to_string());
-    cli.session = resolved_session_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
-    cli.session_dir = resolved_session_dir
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string());
+    cli.session = options
+        .session_path
+        .as_deref()
+        .map(|p| resolve_path_for_cwd(p, &cwd).to_string_lossy().to_string());
+    cli.session_dir = options
+        .session_dir
+        .as_deref()
+        .map(|p| resolve_path_for_cwd(p, &cwd).to_string_lossy().to_string());
     if let Some(enabled_tools) = &options.enabled_tools {
         if enabled_tools.is_empty() {
             cli.no_tools = true;
@@ -1846,17 +1863,43 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     }
 
     let config = Config::load()?;
-
     let mut auth = AuthStorage::load_async(Config::auth_path()).await?;
     auth.refresh_expired_oauth_tokens().await?;
-
     let global_dir = Config::global_dir();
-    let package_dir = Config::package_dir();
     let models_path = default_models_path(&global_dir);
     let model_registry = ModelRegistry::load(&auth, Some(models_path));
 
-    let mut session = Session::new(&cli, &config).await?;
-    if resolved_session_path.is_none() {
+    Ok(AgentSessionServices {
+        cwd,
+        global_dir,
+        config,
+        auth,
+        model_registry,
+        diagnostics: Vec::new(),
+        cli,
+    })
+}
+
+/// 对齐 TS `createAgentSessionFromServices`:build a Session from pre-existing services.
+///
+/// Takes an `AgentSessionServices` bundle (from `create_agent_session_services`)
+/// and creates a full `AgentSessionHandle`. This avoids reloading Config/Auth/
+/// ModelRegistry when they already exist.
+#[allow(clippy::too_many_lines)]
+pub async fn create_agent_session_from_services(
+    services: &AgentSessionServices,
+    options: SessionOptions,
+) -> Result<AgentSessionHandle> {
+    let cwd = &services.cwd;
+    let cli = &services.cli;
+    let config = &services.config;
+    let auth = &services.auth;
+    let model_registry = &services.model_registry;
+    let global_dir = &services.global_dir;
+    let package_dir = Config::package_dir();
+
+    let mut session = Session::new(cli, config).await?;
+    if options.session_path.is_none() {
         session.header.cwd = cwd.display().to_string();
     }
     let scoped_patterns = if let Some(models_arg) = &cli.models {
@@ -1867,16 +1910,16 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     let scoped_models = if scoped_patterns.is_empty() {
         Vec::new()
     } else {
-        app::resolve_model_scope(&scoped_patterns, &model_registry, cli.api_key.is_some())
+        app::resolve_model_scope(&scoped_patterns, model_registry, cli.api_key.is_some())
     };
 
     let selection = app::select_model_and_thinking(
-        &cli,
-        &config,
+        cli,
+        config,
         &session,
-        &model_registry,
+        model_registry,
         &scoped_models,
-        &global_dir,
+        global_dir,
     )
     .map_err(|err| Error::validation(err.to_string()))?;
     app::update_session_for_selection(&mut session, &selection);
@@ -1892,11 +1935,11 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         .collect::<Vec<_>>();
 
     let system_prompt = app::build_system_prompt(
-        &cli,
-        &cwd,
+        cli,
+        cwd,
         &enabled_tools,
         None,
-        &global_dir,
+        global_dir,
         &package_dir,
         std::env::var_os("PI_TEST_MODE").is_some(),
         options.include_cwd_in_prompt,
@@ -1906,11 +1949,11 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     let provider = providers::create_provider(&selection.model_entry, None)
         .map_err(|e| Error::provider("sdk", e.to_string()))?;
 
-    let api_key = app::resolve_api_key(&auth, &cli, &selection.model_entry)
+    let api_key = app::resolve_api_key(auth, cli, &selection.model_entry)
         .map_err(|err| Error::validation(err.to_string()))?;
 
     let stream_options =
-        build_stream_options_with_optional_key(&config, api_key, &selection, &session);
+        build_stream_options_with_optional_key(config, api_key, &selection, &session);
 
     let agent_config = AgentConfig {
         system_prompt: Some(system_prompt),
@@ -1922,8 +1965,8 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     };
 
     let tools = options.tool_factory.as_ref().map_or_else(
-        || ToolRegistry::new(&enabled_tools, &cwd, Some(&config)),
-        |factory| factory.create_tool_registry(&enabled_tools, &cwd, &config),
+        || ToolRegistry::new(&enabled_tools, cwd, Some(config)),
+        |factory| factory.create_tool_registry(&enabled_tools, cwd, config),
     );
     let session_arc = Arc::new(asupersync::sync::Mutex::new(session));
 
@@ -1951,7 +1994,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         let extension_paths = options
             .extension_paths
             .iter()
-            .map(|path| resolve_path_for_cwd(path, &cwd))
+            .map(|path| resolve_path_for_cwd(path, cwd))
             .collect::<Vec<_>>();
         let resolved_ext_policy =
             config.resolve_extension_policy_with_metadata(options.extension_policy.as_deref());
@@ -1961,8 +2004,8 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         agent_session
             .enable_extensions_with_policy(
                 &enabled_tools,
-                &cwd,
-                Some(&config),
+                cwd,
+                Some(config),
                 &extension_paths,
                 Some(resolved_ext_policy.policy),
                 Some(resolved_repair_policy.effective_mode),
@@ -1972,7 +2015,7 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
     }
 
     agent_session.set_model_registry(model_registry.clone());
-    agent_session.set_auth_storage(auth);
+    agent_session.set_auth_storage(auth.clone());
 
     let history = {
         let cx = crate::agent_cx::AgentCx::for_request();
@@ -1998,6 +2041,13 @@ pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessio
         session: agent_session,
         listeners,
     })
+}
+
+/// This is the programmatic entrypoint for non-CLI consumers that want to run
+/// Pi sessions in-process.
+pub async fn create_agent_session(options: SessionOptions) -> Result<AgentSessionHandle> {
+    let services = create_agent_session_services(&options).await?;
+    create_agent_session_from_services(&services, options).await
 }
 
 #[cfg(test)]
