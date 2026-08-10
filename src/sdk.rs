@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub use crate::agent::{
     AbortHandle, AbortSignal, Agent, AgentConfig, AgentEvent, AgentSession, QueueMode,
 };
+pub use crate::app::{resolve_model_scope_with_diagnostics, ScopedModel};
 pub use crate::config::Config;
 pub use crate::error::{Error, Result};
 pub use crate::extensions::{ExtensionManager, ExtensionPolicy, ExtensionRegion};

@@ -973,6 +973,16 @@ pub fn resolve_model_scope(
     registry: &ModelRegistry,
     allow_missing_keys: bool,
 ) -> Vec<ScopedModel> {
+    resolve_model_scope_with_diagnostics(patterns, registry, allow_missing_keys).0
+}
+
+/// 对齐 TS `resolveModelScopeWithDiagnostics`:返回 (scoped_models, warnings)。
+/// warnings 是人可读的诊断消息(pattern 无效 / 无匹配等),替代 eprintln!。
+pub fn resolve_model_scope_with_diagnostics(
+    patterns: &[String],
+    registry: &ModelRegistry,
+    allow_missing_keys: bool,
+) -> (Vec<ScopedModel>, Vec<String>) {
     let available_models = if allow_missing_keys {
         registry.models().to_vec()
     } else {
@@ -980,6 +990,7 @@ pub fn resolve_model_scope(
     };
 
     let mut scoped_models: Vec<ScopedModel> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for pattern in patterns {
         if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
@@ -995,7 +1006,7 @@ pub fn resolve_model_scope(
             let glob = match Pattern::new(&glob_pattern.to_lowercase()) {
                 Ok(glob) => glob,
                 Err(err) => {
-                    eprintln!("Warning: Invalid model pattern \"{pattern}\": {err}");
+                    warnings.push(format!("Invalid model pattern \"{pattern}\": {err}"));
                     continue;
                 }
             };
@@ -1020,14 +1031,14 @@ pub fn resolve_model_scope(
             }
 
             if !matched_any {
-                eprintln!("Warning: No models match pattern \"{pattern}\"");
+                warnings.push(format!("No models match pattern \"{pattern}\""));
             }
             continue;
         }
 
         let parsed = parse_model_pattern(pattern, &available_models);
         if let Some(warning) = parsed.warning {
-            eprintln!("Warning: {warning}");
+            warnings.push(warning);
         }
 
         if let Some(model) = parsed.model {
@@ -1041,11 +1052,11 @@ pub fn resolve_model_scope(
                 });
             }
         } else {
-            eprintln!("Warning: No models match pattern \"{pattern}\"");
+            warnings.push(format!("No models match pattern \"{pattern}\""));
         }
     }
 
-    scoped_models
+    (scoped_models, warnings)
 }
 
 fn parse_model_pattern(pattern: &str, available_models: &[ModelEntry]) -> ParsedModelResult {

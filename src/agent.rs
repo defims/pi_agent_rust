@@ -8262,6 +8262,16 @@ impl AgentSession {
         self.auth_storage = Some(auth);
     }
 
+    /// 只读访问已注入的 ModelRegistry(可能为 None:未注入或通过 sdk 创建后未保留)。
+    pub fn model_registry(&self) -> Option<&ModelRegistry> {
+        self.model_registry.as_ref()
+    }
+
+    /// 只读访问已注入的 AuthStorage(可能为 None)。
+    pub fn auth_storage(&self) -> Option<&AuthStorage> {
+        self.auth_storage.as_ref()
+    }
+
     #[must_use]
     pub fn with_api_key_override(mut self, api_key: Option<String>) -> Self {
         self.set_api_key_override(api_key);
