@@ -97,7 +97,9 @@ impl SessionIndex {
             last_modified_ms,
             size_bytes,
             name,
-            ..Default::default()
+            first_message: "(no messages)".to_string(),
+            parent_session_path: header.parent_session.clone(),
+            modified_ms: 0,
         };
         self.upsert_meta(meta)
     }
@@ -609,7 +611,17 @@ fn row_to_meta(row: &sqlmodel_core::Row) -> Result<SessionMeta> {
         name: row
             .get_named::<Option<String>>("name")
             .map_err(|e| Error::session(format!("get name: {e}")))?,
-        ..Default::default()
+        first_message: row
+            .get_named::<Option<String>>("first_message")
+            .map_err(|e| Error::session(format!("get first_message: {e}")))?
+            .unwrap_or_else(|| "(no messages)".to_string()),
+        parent_session_path: row
+            .get_named::<Option<String>>("parent_session_path")
+            .map_err(|e| Error::session(format!("get parent_session_path: {e}")))?,
+        modified_ms: row
+            .get_named::<Option<i64>>("modified_ms")
+            .map_err(|e| Error::session(format!("get modified_ms: {e}")))?
+            .unwrap_or(0),
     })
 }
 
@@ -632,7 +644,9 @@ fn build_meta(
         last_modified_ms,
         size_bytes,
         name,
-        ..Default::default()
+        first_message: "(no messages)".to_string(),
+        parent_session_path: header.parent_session.clone(),
+        modified_ms: parse_iso_to_millis(&header.timestamp).unwrap_or(last_modified_ms),
     })
 }
 
@@ -758,6 +772,8 @@ fn build_meta_from_jsonl(path: &Path) -> Result<SessionMeta> {
 
     let mut message_count = 0u64;
     let mut name = None;
+    let mut first_message: Option<String> = None;
+    let mut max_activity_ms: Option<i64> = None;
     loop {
         let Some(line_buf) = read_capped_utf8_line(&mut reader).map_err(|err| {
             Error::session(format!("Read session entry line {}: {err}", path.display()))
@@ -768,7 +784,24 @@ fn build_meta_from_jsonl(path: &Path) -> Result<SessionMeta> {
 
         if let Ok(entry) = serde_json::from_str::<PartialEntry>(&line_buf) {
             match entry.r#type.as_str() {
-                "message" => message_count += 1,
+                "message" => {
+                    message_count += 1;
+                    if let Some(message) = &entry.message
+                        && let Some(content) = &message.content
+                    {
+                        if first_message.is_none()
+                            && message.role.as_deref() == Some("user")
+                        {
+                            first_message = extract_text_content(content);
+                        }
+                        if let Some(ts) = message.timestamp
+                            && ts > 0.0
+                            && matches!(message.role.as_deref(), Some("user") | Some("assistant"))
+                        {
+                            max_activity_ms = Some(max_activity_ms.unwrap_or(0).max(ts as i64));
+                        }
+                    }
+                }
                 "session_info" if entry.name.is_some() => {
                     name = entry.name;
                 }
@@ -790,12 +823,16 @@ fn build_meta_from_jsonl(path: &Path) -> Result<SessionMeta> {
         path: path.display().to_string(),
         id: header.id,
         cwd: header.cwd,
-        timestamp: header.timestamp,
+        timestamp: header.timestamp.clone(),
         message_count,
         last_modified_ms,
         size_bytes,
         name,
-        ..Default::default()
+        first_message: first_message.unwrap_or_else(|| "(no messages)".to_string()),
+        parent_session_path: header.parent_session.clone(),
+        modified_ms: max_activity_ms.unwrap_or_else(|| {
+            parse_iso_to_millis(&header.timestamp).unwrap_or(last_modified_ms)
+        }),
     })
 }
 
@@ -815,12 +852,14 @@ fn build_meta_from_sqlite(path: &Path) -> Result<SessionMeta> {
         path: path.display().to_string(),
         id: header.id,
         cwd: header.cwd,
-        timestamp: header.timestamp,
+        timestamp: header.timestamp.clone(),
         message_count: meta.message_count,
         last_modified_ms,
         size_bytes,
         name: meta.name,
-        ..Default::default()
+        first_message: "(no messages)".to_string(),
+        parent_session_path: header.parent_session.clone(),
+        modified_ms: parse_iso_to_millis(&header.timestamp).unwrap_or(last_modified_ms),
     })
 }
 
