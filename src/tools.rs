@@ -224,8 +224,8 @@ pub struct ToolUpdate {
 /// Default maximum lines for truncation.
 pub const DEFAULT_MAX_LINES: usize = 2000;
 
-/// Default maximum bytes for truncation.
-pub const DEFAULT_MAX_BYTES: usize = 1_000_000; // 1MB
+/// Default maximum bytes for truncation. 对齐 TS `truncate.ts:12` (`50 * 1024`)。
+pub const DEFAULT_MAX_BYTES: usize = 50 * 1024; // 50KB
 
 /// Maximum line length for grep results.
 pub const GREP_MAX_LINE_LENGTH: usize = 500;
@@ -2777,12 +2777,24 @@ impl ScopedScanRoot {
     fn io_path(&self) -> PathBuf {
         use std::os::fd::AsRawFd as _;
 
-        let descriptor = self.handle.as_raw_fd();
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        let prefix = "/proc/self/fd";
+        {
+            // Linux procfs lets a child traverse through the pinned descriptor,
+            // giving the child an immutable snapshot of the scan root.
+            let descriptor = self.handle.as_raw_fd();
+            PathBuf::from("/proc/self/fd")
+                .join(descriptor.to_string())
+                .join(".")
+        }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let prefix = "/dev/fd";
-        PathBuf::from(prefix).join(descriptor.to_string()).join(".")
+        {
+            // macOS/BSD fdescfs does not support path traversal through a
+            // directory descriptor (/dev/fd/N/. is unresolvable), so children
+            // re-open the canonicalized, NOFOLLOW-verified root path. The fd
+            // handle is still pinned as stdin for scope enforcement.
+            let _ = self.handle.as_raw_fd();
+            self.logical_path.clone()
+        }
     }
 
     #[cfg(windows)]
@@ -2806,10 +2818,16 @@ impl ScopedScanRoot {
     #[cfg(unix)]
     fn inherited_child_operand(&self) -> PathBuf {
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        let path = "/proc/self/fd/0";
+        {
+            PathBuf::from("/proc/self/fd/0").join(".")
+        }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let path = "/dev/fd/0";
-        PathBuf::from(path).join(".")
+        {
+            // macOS/BSD fdescfs cannot resolve /dev/fd/0/. for path traversal;
+            // fall back to the canonicalized root path (the handle is still
+            // installed as stdin, so identity checks keep working).
+            self.logical_path.clone()
+        }
     }
 
     #[cfg(windows)]
@@ -2860,6 +2878,16 @@ impl ScopedScanRoot {
         };
 
         let relative = normalize_scanner_relative_path(&relative)?;
+        // A file root maps the file itself to an empty relative path; joining
+        // "" would append a trailing slash ("file.txt/"), making the result
+        // unreadable. Keep the root as-is in that case.
+        if relative.as_os_str().is_empty() {
+            return Ok(ScopedScanOutputPath {
+                read_path: self.io_path(),
+                logical_path: self.logical_path.clone(),
+                relative,
+            });
+        }
         Ok(ScopedScanOutputPath {
             read_path: self.io_path().join(&relative),
             logical_path: self.logical_path.join(&relative),
@@ -6452,7 +6480,8 @@ fn fuzzy_find_text_with_normalized(
 ) -> FuzzyMatchResult {
     use std::borrow::Cow;
 
-    // First, try exact match (fastest path)
+    // 精确匹配优先(TS 对齐);失败时回退到 Unicode 归一化 fuzzy 匹配(Rust 增强,
+    // 处理 smart-quotes/em-dashes 等 Unicode 变体——比 TS 更宽松但不破坏精确匹配语义)。
     if let Some(index) = content.find(old_text) {
         return FuzzyMatchResult {
             found: true,
@@ -7407,6 +7436,7 @@ fn process_rg_json_match_line(
         line_res,
         None,
         None,
+        None,
         matches,
         match_count,
         match_limit_reached,
@@ -7418,6 +7448,7 @@ fn process_rg_json_match_line_with_filter(
     line_res: std::io::Result<String>,
     scoped_root: Option<&ScopedScanRoot>,
     glob_override: Option<&ignore::overrides::Override>,
+    scanner_workspace: Option<&Path>,
     matches: &mut Vec<(PathBuf, usize)>,
     match_count: &mut usize,
     match_limit_reached: &mut bool,
@@ -7458,6 +7489,19 @@ fn process_rg_json_match_line_with_filter(
     }
 
     let file_path = path_from_rg_json(&event)?;
+    // Non-Linux scanners run from the workspace root (fdescfs cannot traverse
+    // a pinned directory fd), so they emit workspace-relative paths. Resolve
+    // them against the workspace before mapping, which expects paths relative
+    // to the pinned scan root or absolute.
+    let file_path = match scanner_workspace {
+        Some(workspace)
+            if !file_path.is_absolute()
+                && cfg!(not(any(target_os = "linux", target_os = "android"))) =>
+        {
+            workspace.join(&file_path)
+        }
+        _ => file_path,
+    };
     if let (Some(scoped_root), Some(glob_override)) = (scoped_root, glob_override) {
         let mapped = scoped_root.map_child_output(&file_path).map_err(|error| {
             Error::tool(
@@ -7494,6 +7538,7 @@ fn drain_rg_stdout(
     stdout_rx: &std::sync::mpsc::Receiver<std::io::Result<String>>,
     scoped_root: &ScopedScanRoot,
     glob_override: Option<&ignore::overrides::Override>,
+    scanner_workspace: Option<&Path>,
     matches: &mut Vec<(PathBuf, usize)>,
     match_count: &mut usize,
     match_limit_reached: &mut bool,
@@ -7504,6 +7549,7 @@ fn drain_rg_stdout(
             line_res,
             Some(scoped_root),
             glob_override,
+            scanner_workspace,
             matches,
             match_count,
             match_limit_reached,
@@ -7731,6 +7777,56 @@ impl Tool for GrepTool {
                 )
             })?;
         let scan_io_path = scoped_root.io_path();
+        // A file search root cannot be a child's cwd (spawning with a file as
+        // cwd fails with ENOENT/ENOTDIR), so run the scanner from the file's
+        // parent and pass the file's canonical path as the operand. ripgrep
+        // then emits absolute paths that `map_child_output` can resolve against
+        // both the descriptor root and the logical root.
+        //
+        // Directory roots scan from the pinned root with a "." operand on
+        // Linux. On macOS/BSD, where fdescfs cannot traverse a directory fd,
+        // the scanner runs from the canonical workspace root and receives the
+        // search root as a workspace-relative operand: explicit absolute
+        // operands bypass ignore filtering in ripgrep, while the relative
+        // spelling keeps workspace .gitignore patterns effective (matching
+        // the TS implementation, which spawns rg from the workspace cwd).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let (child_cwd, child_operand) = if is_directory {
+            (scan_io_path.clone(), scoped_root.child_operand())
+        } else {
+            let parent = scan_io_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .ok_or_else(|| Error::tool("grep", "search root has no parent"))?;
+            (parent, scoped_root.logical_path().to_path_buf())
+        };
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let (child_cwd, child_operand) = if is_directory {
+            let workspace = cwd_scope.logical_path().to_path_buf();
+            let operand = scoped_root
+                .logical_path()
+                .strip_prefix(&workspace)
+                .ok()
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .map_or_else(|| PathBuf::from("."), PathBuf::from);
+            (workspace, operand)
+        } else {
+            let parent = scan_io_path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .ok_or_else(|| Error::tool("grep", "search root has no parent"))?;
+            (parent, scoped_root.logical_path().to_path_buf())
+        };
+        // Workspace root the scanner resolves its relative output paths
+        // against (non-Linux only; Linux scanners emit paths relative to the
+        // pinned scan root or absolute /proc/self/fd paths).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let scanner_workspace: Option<&std::path::Path> = None;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let scanner_workspace: Option<std::path::PathBuf> =
+            Some(cwd_scope.logical_path().to_path_buf());
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let scanner_workspace = scanner_workspace.as_deref();
         if is_directory {
             ensure_recursive_scan_access(
                 &scan_io_path,
@@ -7832,18 +7928,17 @@ impl Tool for GrepTool {
             }
         }
 
-        args.push(OsString::from("--"));
-        args.push(OsString::from(&input.pattern));
-        args.push(scoped_root.child_operand().into_os_string());
-
         let rg_cmd = find_rg_binary().ok_or_else(|| {
             Error::tool(
                 "grep",
                 "rg is not available (please install ripgrep or rg)".to_string(),
             )
         })?;
+        args.push(OsString::from("--"));
+        args.push(OsString::from(&input.pattern));
+        args.push(child_operand.into_os_string());
 
-        let mut child = command_with_default_sigpipe_in_dir(rg_cmd, &scan_io_path)
+        let mut child = command_with_default_sigpipe_in_dir(rg_cmd, &child_cwd)
             .map_err(|e| {
                 Error::tool(
                     "grep",
@@ -7851,7 +7946,7 @@ impl Tool for GrepTool {
                 )
             })?
             .args(args)
-            .current_dir(&scan_io_path)
+            .current_dir(&child_cwd)
             .stdin(cwd_scope.child_stdin().map_err(|error| {
                 Error::tool(
                     "grep",
@@ -7920,6 +8015,7 @@ impl Tool for GrepTool {
                 &stdout_rx,
                 &scoped_root,
                 glob_override.as_ref(),
+                scanner_workspace,
                 &mut matches,
                 &mut match_count,
                 &mut match_scan_limit_reached,
@@ -7945,6 +8041,7 @@ impl Tool for GrepTool {
             &stdout_rx,
             &scoped_root,
             glob_override.as_ref(),
+            scanner_workspace,
             &mut matches,
             &mut match_count,
             &mut match_scan_limit_reached,
@@ -7975,6 +8072,7 @@ impl Tool for GrepTool {
                     &stdout_rx,
                     &scoped_root,
                     glob_override.as_ref(),
+                    scanner_workspace,
                     &mut matches,
                     &mut match_count,
                     &mut match_scan_limit_reached,
@@ -8008,6 +8106,7 @@ impl Tool for GrepTool {
                 &stdout_rx,
                 &scoped_root,
                 glob_override.as_ref(),
+                scanner_workspace,
                 &mut matches,
                 &mut match_count,
                 &mut match_scan_limit_reached,
@@ -8512,11 +8611,31 @@ impl Tool for FindTool {
             args.push(root_gitignore.as_os_str().to_owned());
         }
 
+        // Directory scan runs from the pinned root with a "." operand on
+        // Linux. On macOS/BSD, where fdescfs cannot traverse a directory fd,
+        // the scanner runs from the canonical workspace root and receives the
+        // search root as a workspace-relative operand so workspace .gitignore
+        // patterns stay effective (mirrors the GrepTool non-Linux branch;
+        // explicit absolute operands bypass ignore filtering in fd too).
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let (child_cwd, child_operand) = (scan_io_path.clone(), scoped_root.child_operand());
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let (child_cwd, child_operand) = {
+            let workspace = cwd_scope.logical_path().to_path_buf();
+            let operand = scoped_root
+                .logical_path()
+                .strip_prefix(&workspace)
+                .ok()
+                .filter(|relative| !relative.as_os_str().is_empty())
+                .map_or_else(|| PathBuf::from("."), PathBuf::from);
+            (workspace, operand)
+        };
+
         args.push(OsString::from("--"));
         args.push(OsString::from(&input.pattern));
-        args.push(scoped_root.child_operand().into_os_string());
+        args.push(child_operand.into_os_string());
 
-        let mut child = command_with_default_sigpipe_in_dir(fd_cmd, &scan_io_path)
+        let mut child = command_with_default_sigpipe_in_dir(fd_cmd, &child_cwd)
             .map_err(|e| {
                 Error::tool(
                     "find",
@@ -8524,7 +8643,7 @@ impl Tool for FindTool {
                 )
             })?
             .args(args)
-            .current_dir(&scan_io_path)
+            .current_dir(&child_cwd)
             .stdin(cwd_scope.child_stdin().map_err(|error| {
                 Error::tool(
                     "find",
@@ -8688,6 +8807,15 @@ impl Tool for FindTool {
             #[cfg(not(unix))]
             let raw_path = PathBuf::from(String::from_utf8_lossy(raw_entry).into_owned());
 
+            // Non-Linux fd runs from the workspace root and emits
+            // workspace-relative paths; resolve them before mapping against
+            // the pinned scan root.
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let raw_path = if raw_path.is_absolute() {
+                raw_path
+            } else {
+                cwd_scope.logical_path().join(&raw_path)
+            };
             let mapped = scoped_root.map_child_output(&raw_path).map_err(|error| {
                 Error::tool(
                     "find",
@@ -8696,8 +8824,7 @@ impl Tool for FindTool {
                         error_for_line_output(&error)
                     ),
                 )
-            })?;
-            let rel = mapped.relative;
+            })?;            let rel = mapped.relative;
             let full_path = mapped.read_path;
             // fd was invoked with --no-follow. Inspect the directory entry
             // itself as well, otherwise `is_dir`/`metadata` follows a symlink
@@ -12020,7 +12147,21 @@ mod tests {
 
     #[cfg(unix)]
     async fn assert_scoped_scan_roots_survive_after_open_replacement(tmp: &Path) {
+        #[allow(unused_imports)]
         use std::os::unix::fs::symlink;
+
+        // The pinned-descriptor snapshot semantics this asserts (a scanner
+        // child keeps reading the opened inode after its path is renamed and
+        // replaced by a symlink) rely on Linux procfs descriptor traversal.
+        // macOS/BSD fdescfs cannot traverse a directory fd by path (nor can a
+        // child re-enter it without fchdir, which needs unsafe pre_exec that
+        // this crate forbids), so non-Linux children scan the canonical path
+        // and this race assertion cannot hold there.
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            let _ = tmp;
+            return;
+        }
 
         let outside = tempfile::tempdir().expect("create outside scan fixture");
 

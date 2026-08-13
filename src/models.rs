@@ -674,6 +674,18 @@ pub struct CompatConfig {
     pub supports_tools: Option<bool>,
     pub supports_streaming: Option<bool>,
     pub supports_parallel_tool_calls: Option<bool>,
+    /// 对齐 TS `supportsStrictMode`:`strict:false` 仅在非 false 时附加到工具定义。
+    pub supports_strict_mode: Option<bool>,
+    /// 对齐 TS `requiresMistralToolIds`:Mistral 要求工具 ID 恰好 9 个字符。
+    pub requires_mistral_tool_ids: Option<bool>,
+    /// 对齐 TS `requiresToolResultName`:tool 消息带 `name` 字段。
+    pub requires_tool_result_name: Option<bool>,
+    /// 对齐 TS `requiresAssistantAfterToolResult`:图片工具结果后合成
+    /// "I have processed the tool results." assistant bridge。
+    pub requires_assistant_after_tool_result: Option<bool>,
+    /// 对齐 TS `requiresThinkingAsText`(Mistral 等):回放 assistant 消息时把 Thinking
+    /// 块转为纯文本(这些 provider 不接受独立 thinking 块)。
+    pub requires_thinking_as_text: Option<bool>,
 
     // ── Request field overrides ─────────────────────────────────────────
     /// Override the JSON field name for `max_tokens` (e.g., `"max_completion_tokens"` for o1).
@@ -2948,6 +2960,21 @@ fn merge_compat(
                     .thinking_format
                     .clone()
                     .or_else(|| provider.thinking_format.clone()),
+                requires_thinking_as_text: model
+                    .requires_thinking_as_text
+                    .or(provider.requires_thinking_as_text),
+                supports_strict_mode: model
+                    .supports_strict_mode
+                    .or(provider.supports_strict_mode),
+                requires_mistral_tool_ids: model
+                    .requires_mistral_tool_ids
+                    .or(provider.requires_mistral_tool_ids),
+                requires_tool_result_name: model
+                    .requires_tool_result_name
+                    .or(provider.requires_tool_result_name),
+                requires_assistant_after_tool_result: model
+                    .requires_assistant_after_tool_result
+                    .or(provider.requires_assistant_after_tool_result),
             })
         }
     }

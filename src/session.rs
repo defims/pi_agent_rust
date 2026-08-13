@@ -5951,11 +5951,13 @@ impl SessionHeader {
         if !self.r#type.eq("session") {
             return Err(format!("type must be `session`, got `{}`", self.r#type));
         }
-        if !self.version.eq(&Some(SESSION_VERSION)) {
+        // 对齐 TS:version 缺失(None)时容忍(旧版/外部写入的 session 可能无此字段);
+        // 显式版本不匹配才拒绝。
+        if let Some(version) = self.version
+            && version != SESSION_VERSION
+        {
             return Err(format!(
-                "version must be {SESSION_VERSION}, got {}",
-                self.version
-                    .map_or_else(|| "none".to_string(), |value| value.to_string())
+                "version must be {SESSION_VERSION}, got {version}"
             ));
         }
         if self.id.trim().is_empty() {

@@ -1307,6 +1307,17 @@ impl Agent {
             }
         };
 
+        // 对齐 TS `transformMessages`:为孤儿 tool_call(无后续 toolResult)合成
+        // {role:toolResult, content:"No result provided", isError:true},并跳过
+        // error/aborted 的不完整 assistant 轮次。防回放时上游 API 硬 400
+        // (Anthropic/OpenAI strict 要求每个 tool_use 必须有对应 tool_result)。
+        let messages = Cow::Owned(Self::transform_messages_for_replay(
+            &messages,
+            self.provider.name(),
+            self.provider.api(),
+            self.provider.model_id(),
+        ));
+
         // Borrow cached tool defs if available; otherwise build + cache + borrow.
         if self.cached_tool_defs.is_none() {
             let defs: Vec<ToolDef> = self
@@ -1328,6 +1339,112 @@ impl Agent {
             messages,
             tools,
         }
+    }
+
+    /// 对齐 TS `transformMessages`(两遍融合为单遍,避免双重 clone):
+    /// 同时完成——跨 provider thinking→text 转换 + 孤儿 tool_call 合成 +
+    /// 跳过 error/aborted assistant。
+    fn transform_messages_for_replay(
+        messages: &[Message],
+        current_provider: &str,
+        current_api: &str,
+        current_model: &str,
+    ) -> Vec<Message> {
+        let now = Utc::now().timestamp_millis();
+        let synthetic = |id: String, name: String| {
+            Message::tool_result(ToolResultMessage {
+                tool_call_id: id,
+                tool_name: name,
+                content: vec![ContentBlock::Text(TextContent::new("No result provided"))],
+                details: None,
+                is_error: true,
+                timestamp: now,
+            })
+        };
+
+        let mut result: Vec<Message> = Vec::with_capacity(messages.len());
+        let mut pending: Vec<(String, String)> = Vec::new();
+        let mut seen_result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for msg in messages {
+            match msg {
+                Message::Assistant(a) => {
+                    // ── 第一遍逻辑:冲刷上一条孤儿 + 跳过 errored ──
+                    if !pending.is_empty() {
+                        for (id, name) in pending.drain(..) {
+                            if !seen_result_ids.contains(&id) {
+                                result.push(synthetic(id, name));
+                            }
+                        }
+                        seen_result_ids.clear();
+                    }
+                    if matches!(a.stop_reason, StopReason::Error | StopReason::Aborted) {
+                        continue;
+                    }
+
+                    // ── 融合:thinking 转换 + tool_call 记录 + clone(单次)──
+                    let is_same_model = a.provider == current_provider
+                        && a.api == current_api
+                        && a.model == current_model;
+                    let transformed_content: Vec<ContentBlock> = a
+                        .content
+                        .iter()
+                        .flat_map(|block| match block {
+                            ContentBlock::Thinking(t) => {
+                                if is_same_model && t.thinking_signature.is_some() {
+                                    return vec![block.clone()];
+                                }
+                                if t.thinking.trim().is_empty() {
+                                    return vec![];
+                                }
+                                if is_same_model {
+                                    return vec![block.clone()];
+                                }
+                                vec![ContentBlock::Text(TextContent::new(&t.thinking))]
+                            }
+                            _ => vec![block.clone()],
+                        })
+                        .collect();
+
+                    let tool_calls: Vec<(String, String)> = a
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolCall(tc) => Some((tc.id.clone(), tc.name.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    if !tool_calls.is_empty() {
+                        pending = tool_calls;
+                        seen_result_ids.clear();
+                    }
+
+                    let mut cloned = (**a).clone();
+                    cloned.content = transformed_content;
+                    result.push(Message::Assistant(Arc::new(cloned)));
+                }
+                Message::ToolResult(tr) => {
+                    seen_result_ids.insert(tr.tool_call_id.clone());
+                    result.push(msg.clone());
+                }
+                Message::User(_) => {
+                    if !pending.is_empty() {
+                        for (id, name) in pending.drain(..) {
+                            if !seen_result_ids.contains(&id) {
+                                result.push(synthetic(id, name));
+                            }
+                        }
+                        seen_result_ids.clear();
+                    }
+                    result.push(msg.clone());
+                }
+                Message::Custom(_) => {
+                    result.push(msg.clone());
+                }
+            }
+        }
+        // TS 不在末尾冲刷(agent 流程保证 tool_call 后必跟 result)。
+        result
     }
 
     /// Run the agent with a user message.
@@ -2822,7 +2939,9 @@ impl Agent {
             });
         }
 
-        // Phase 2: Execute tools in contiguous compatible-effect batches.
+        // 工具执行策略:effect-batch + 并行执行(Rust 增强性能;TS 为串行但并行更高效
+        // 且 abort/steering 检查在 batch 间生效)。保留并行是因为串行模式引入了 abort
+        // 测试挂起(repeated_abort_then_resume)。
         let effect_plan = tool_calls
             .iter()
             .map(|tool_call| {
@@ -3120,7 +3239,10 @@ impl Agent {
 
         let tool_name = tool_call.name.clone();
         let tool_id = tool_call.id.clone();
-        let tool_args = tool_call.arguments.clone();
+        // 对齐 TS AJV `validateToolArguments(tool, toolCall, { coerceTypes: true })`:
+        // LLM 偶发输出字符串形式的数字(`{"offset":"5"}`),TS 会强制为数字 `5`。
+        // Rust 逐属性按 schema 类型做轻量级 coercion。
+        let tool_args = coerce_tool_arguments(&tool_call.arguments, &tool.parameters());
         let on_event = Arc::clone(&on_event);
 
         let update_callback = move |update: ToolUpdate| {
@@ -10696,6 +10818,83 @@ const TRUNCATED_TOOL_CALL_ERROR: &str = "Model output truncated before tool call
 /// null, so this does not misjudge argument-less tools.
 fn is_complete_tool_call(tool_call: &ToolCall) -> bool {
     !tool_call.name.trim().is_empty() && !tool_call.arguments.is_null()
+}
+
+/// 对齐 TS AJV `coerceTypes: true`:按 schema 类型把字符串形态的值强制为目标类型。
+///
+/// - `integer` / `number`: `"5"` → `5`(解析失败保留原值)
+/// - `boolean`: `"true"` / `"false"` → `true` / `false`; `1` / `0` → `true` / `false`
+///
+/// 递归处理 `properties` 内的嵌套对象;数组元素的 `items` schema 也递归。
+fn coerce_tool_arguments(args: &serde_json::Value, schema: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = args.as_object() else {
+        return args.clone();
+    };
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return args.clone();
+    };
+    let mut out = obj.clone();
+    for (key, value) in &mut out {
+        if let Some(prop_schema) = props.get(key) {
+            *value = coerce_value(value, prop_schema);
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+fn coerce_value(value: &serde_json::Value, schema: &serde_json::Value) -> serde_json::Value {
+    let Some(target_type) = schema.get("type").and_then(|t| t.as_str()) else {
+        // 嵌套对象递归
+        if value.is_object() {
+            return coerce_tool_arguments(value, schema);
+        }
+        return value.clone();
+    };
+    match target_type {
+        "integer" | "number" => {
+            if let Some(s) = value.as_str() {
+                if let Ok(n) = s.parse::<f64>() {
+                    if target_type == "integer" && n.fract() == 0.0 {
+                        return serde_json::json!(n as i64);
+                    }
+                    return serde_json::json!(n);
+                }
+            }
+            value.clone()
+        }
+        "boolean" => match value {
+            serde_json::Value::String(s) if s.eq_ignore_ascii_case("true") => {
+                serde_json::json!(true)
+            }
+            serde_json::Value::String(s) if s.eq_ignore_ascii_case("false") => {
+                serde_json::json!(false)
+            }
+            serde_json::Value::Number(n) if n.as_i64() == Some(1) => serde_json::json!(true),
+            serde_json::Value::Number(n) if n.as_i64() == Some(0) => serde_json::json!(false),
+            _ => value.clone(),
+        },
+        "object" => {
+            if value.is_object() {
+                coerce_tool_arguments(value, schema)
+            } else {
+                value.clone()
+            }
+        }
+        "array" => {
+            if let Some(arr) = value.as_array()
+                && let Some(items_schema) = schema.get("items")
+            {
+                let coerced: Vec<serde_json::Value> = arr
+                    .iter()
+                    .map(|item| coerce_value(item, items_schema))
+                    .collect();
+                serde_json::Value::Array(coerced)
+            } else {
+                value.clone()
+            }
+        }
+        _ => value.clone(),
+    }
 }
 
 /// Whether `message` represents a response the provider truncated at its token
