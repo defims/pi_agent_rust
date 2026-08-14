@@ -1,192 +1,203 @@
-# defims/pi_agent_rust ↔ earendil-works/pi 对齐
+# defims/pi_agent_rust ↔ earendil-works/pi Alignment
 
-> `defims/pi_agent_rust` 是 pi 引擎([earendil-works/pi](https://github.com/earendil-works/pi),
-> TypeScript SDK `@earendil-works/pi-coding-agent`)的 Rust 版本,持续跟随上游。
+> **English (default)** · 中文版: [sdk-mapping.zh-CN.md](./sdk-mapping.zh-CN.md)
 >
-> 本文档记录两者的 `AgentSession` 接口差异,作为补齐 in_process 方法、追上游 release
-> 时检测变更的基线。
+> `defims/pi_agent_rust` is the Rust version of the pi engine ([earendil-works/pi](https://github.com/earendil-works/pi),
+> TypeScript SDK `@earendil-works/pi-coding-agent`), continuously tracking upstream.
 >
-> - **对齐基准**:earendil-works/pi 的 `AgentSessionLike` 接口(agegr/pi-web `lib/pi-types.ts`)
-> - **被对齐对象**:defims/pi_agent_rust 的 `AgentSessionHandle`(in_process 路径,`src/sdk.rs`)
-> - **Rust crate lib 名**:`pi`(Cargo 包名 `pi_agent_rust`)
+> This document records the `AgentSession` interface differences between the two, serving as
+> the baseline for filling missing in_process methods and detecting changes when tracking
+> upstream releases.
+>
+> - **Alignment target**: earendil-works/pi's `AgentSessionLike` interface (agegr/pi-web `lib/pi-types.ts`)
+> - **Aligned object**: defims/pi_agent_rust's `AgentSessionHandle` (in_process path, `src/sdk.rs`)
+> - **Rust crate lib name**: `pi` (Cargo package name `pi_agent_rust`)
 
-## fork 核心要求
+## Core rules
 
-消费方(moho-mate)进程内嵌引擎(in_process 路径),对 fork 的三个核心要求,补齐方法/追上游时不得破坏:
+- **Docs default to English**: the canonical copy is English (`X.md`); the Chinese version lives at `X.zh-CN.md`, cross-linked from the file header; update both copies together on any change.
+- **Commits in English**: git commit messages in this repository are always written in English.
 
-1. **能并行** — 多个 `AgentSessionHandle` 实例可同时运行(多会话并发),handle 之间不得引入全局锁或共享可变状态把并发串行化。
-2. **异步的并行** — 并行经 async 任务实现(引擎跑在 asupersync runtime 上,调用方自建 runtime),不阻塞 OS 线程;事件流经 `on_event`/`subscribe` 回调送出。
-3. **异步** — 全链路 `async fn`,形态对齐 TS SDK 返回 Promise 的方法;长操作(prompt/bash/compact)可经 `AbortHandle`/`Signal` 随时取消,不阻塞调用方。
+## Fork core requirements
 
-## 状态图例
+The consumer (moho-mate) embeds the engine in-process (in_process path). Three core
+requirements the fork must uphold while filling gaps / tracking upstream:
 
-- ✅ **已对齐** — 两边都有,语义一致(可能有参数形态差异)
-- 🟡 **形态不同** — 语义对齐,但调用方式/参数/返回类型不同(语言范式差异)
-- ❌ **缺口** — TS SDK 有,Rust 无(待补)
-- ⏭️ **架构差异** — 扩展/custom-ui 系统,Rust 不实现
+1. **Parallel-capable** — multiple `AgentSessionHandle` instances run concurrently (multi-session); no global lock or shared mutable state between handles may serialize them.
+2. **Async parallelism** — concurrency is expressed as async tasks (the engine runs on the asupersync runtime, built by the caller) instead of blocking OS threads; events flow out through `on_event`/`subscribe` callbacks.
+3. **Async throughout** — the whole surface is `async fn`, mirroring the TS SDK's Promise-returning shape; long operations (prompt/bash/compact) are cancellable at any time via `AbortHandle`/`Signal` and never block the caller.
+
+## Status legend
+
+- ✅ **Aligned** — present on both sides, same semantics (parameter shapes may differ)
+- 🟡 **Different shape** — semantics match, but calling convention/params/return types differ (language-paradigm differences)
+- ❌ **Gap** — the TS SDK has it, Rust does not (to fill)
+- ⏭️ **Architectural difference** — extensions/custom-ui system; not implemented in Rust
 
 ---
 
-## 1. 会话核心(✅ 已对齐)
+## 1. Session core (✅ aligned)
 
-| TS SDK (`AgentSessionLike`) | Rust (`AgentSessionHandle`) | 说明 |
+| TS SDK (`AgentSessionLike`) | Rust (`AgentSessionHandle`) | Notes |
 |---|---|---|
-| `prompt(text, options?)` | `prompt(input, on_event)` / `prompt_with_abort(input, signal, on_event)` | 🟡 Rust 拆成带/不带 abort 两版;options(images/streamingBehavior)走 SessionOptions |
-| `abort()` | `new_abort_handle()` + `AbortHandle.abort()` | 🟡 Rust 需预建 AbortHandle+Signal |
-| `subscribe(listener)` | `subscribe(listener)` / `unsubscribe(id)` | ✅ Rust 多了显式 unsubscribe |
-| `dispose()` | `into_inner()` | 🟡 Rust 消费 handle 取内部 session |
-| `reload(options?)` | `continue_turn(on_event)` / `continue_turn_with_abort(...)` | 🟡 语义不完全等价 |
-| `setModel(model)` | `set_model(provider, model_id)` | 🟡 TS 传对象,Rust 拆 provider+model_id |
+| `prompt(text, options?)` | `prompt(input, on_event)` / `prompt_with_abort(input, signal, on_event)` | 🟡 Rust splits into with/without-abort variants; options (images/streamingBehavior) go through SessionOptions |
+| `abort()` | `new_abort_handle()` + `AbortHandle.abort()` | 🟡 Rust requires a pre-built AbortHandle+Signal |
+| `subscribe(listener)` | `subscribe(listener)` / `unsubscribe(id)` | ✅ Rust adds an explicit unsubscribe |
+| `dispose()` | `into_inner()` | 🟡 Rust consumes the handle to take the inner session |
+| `reload(options?)` | `continue_turn(on_event)` / `continue_turn_with_abort(...)` | 🟡 not fully equivalent |
+| `setModel(model)` | `set_model(provider, model_id)` | 🟡 TS takes an object; Rust splits provider+model_id |
 | `model` (readonly) | `model() -> (String, String)` | ✅ |
 | `setThinkingLevel(level)` | `set_thinking_level(level)` | ✅ |
 | `setSessionName(name)` | `set_session_name(name)` | ✅ |
-| `compact(customInstructions?)` | `compact(on_event)` / `compact_with_instructions(instructions, on_event)` | ✅ fork 补了 instructions 版 |
-| `steer(text, images?)` | `steer(message)` | 🟡 Rust 缺 images 参数 |
-| `followUp(text, images?)` | `follow_up(message)` | 🟡 同上 |
-| `sessionId` (readonly) | `session().session.lock().header.id` | 🟡 需 async 锁 |
-| `sessionFile` (readonly) | `session().session.lock()` 读文件路径 | 🟡 |
-| `isStreaming` (readonly) | `state().await.is_streaming` | 🟡 需 async |
+| `compact(customInstructions?)` | `compact(on_event)` / `compact_with_instructions(instructions, on_event)` | ✅ fork added the instructions variant |
+| `steer(text, images?)` | `steer(message)` | 🟡 Rust lacks the images param |
+| `followUp(text, images?)` | `follow_up(message)` | 🟡 same |
+| `sessionId` (readonly) | `session().session.lock().header.id` | 🟡 needs an async lock |
+| `sessionFile` (readonly) | `session().session.lock()` reads the file path | 🟡 |
+| `isStreaming` (readonly) | `state().await.is_streaming` | 🟡 needs await |
 | `isCompacting` (readonly) | `state().await.is_compacting` | 🟡 |
 
-## 2. 统计 / bash / 压缩(✅ fork 已补)
+## 2. Stats / bash / compaction (✅ filled by the fork)
 
-| TS SDK | Rust | 说明 |
+| TS SDK | Rust | Notes |
 |---|---|---|
 | `getSessionStats()` | `get_session_stats()` | ✅ fork commit e178fb48 |
 | `getLastAssistantText()` | `get_last_assistant_text()` | ✅ fork commit e178fb48 |
 | `setAutoCompactionEnabled(b)` | `set_auto_compaction(b)` | ✅ fork commit e178fb48 |
 | `compact(customInstructions?)` | `compact_with_instructions(...)` | ✅ fork commit e178fb48 |
-| `executeBash(cmd, onChunk?, opts?)` | `bash(cmd, abort_rx)` | 🟡 fork commit 52d39dc3,参数形态不同(abort 用 oneshot,无 onChunk) |
-| `autoCompactionEnabled` (readonly) | 无(只能 set 不能 read) | ❌ 缺 getter |
+| `executeBash(cmd, onChunk?, opts?)` | `bash(cmd, abort_rx)` | 🟡 fork commit 52d39dc3; different param shape (abort via oneshot, no onChunk) |
+| `autoCompactionEnabled` (readonly) | none (set-only, no read) | ❌ missing getter |
 
-## 3. 队列管理(❌ 缺口)
+## 3. Queue management (❌ gap)
 
-TS SDK 有队列(steering/followUp)的读写 + 清空,Rust 的 pi 内部 queue 是私有的。
+The TS SDK exposes reading + clearing of the (steering/followUp) queue; pi's internal queue is private in Rust.
 
-| TS SDK | Rust | 说明 |
+| TS SDK | Rust | Notes |
 |---|---|---|
-| `clearQueue()` | 无(pi 内部 queue 私有) | ❌ moho-mate 用 LoopState 镜像清 |
-| `getSteeringMessages()` | 无 | ❌ |
-| `getFollowUpMessages()` | 无 | ❌ |
-| `pendingMessageCount` (readonly) | 无 | ❌ |
+| `clearQueue()` | none (pi's internal queue is private) | ❌ moho-mate clears via a LoopState mirror |
+| `getSteeringMessages()` | none | ❌ |
+| `getFollowUpMessages()` | none | ❌ |
+| `pendingMessageCount` (readonly) | none | ❌ |
 
-## 4. 工具管理(❌ 缺口)
+## 4. Tool management (❌ gap)
 
-Rust 有 `ToolRegistry` 但未在 handle 上暴露查询/设置方法。
+Rust has a `ToolRegistry`, but no query/set methods are exposed on the handle.
 
-| TS SDK | Rust | 说明 |
+| TS SDK | Rust | Notes |
 |---|---|---|
-| `getAllTools()` | 无 handle 方法(底层 ToolRegistry 有) | ❌ |
-| `getActiveToolNames()` | 无 | ❌ |
-| `setActiveToolsByName(names)` | 无(moho-mate 用 set_system_prompt 近似) | ❌ PARTIAL |
+| `getAllTools()` | no handle method (the underlying ToolRegistry has it) | ❌ |
+| `getActiveToolNames()` | none | ❌ |
+| `setActiveToolsByName(names)` | none (moho-mate approximates via set_system_prompt) | ❌ PARTIAL |
 
-## 5. 导航(❌ 缺口)
+## 5. Navigation (❌ gap)
 
-| TS SDK | Rust | 说明 |
+| TS SDK | Rust | Notes |
 |---|---|---|
-| `navigateTree(targetId, opts?)` | 无 handle 方法(底层 Session.navigate_to 有) | ❌ moho-mate 走 session_mut().session.lock().navigate_to |
+| `navigateTree(targetId, opts?)` | no handle method (the underlying Session.navigate_to exists) | ❌ moho-mate goes through session_mut().session.lock().navigate_to |
 
-## 6. bash 辅助状态(❌ 缺口)
+## 6. Bash helper state (❌ gap)
 
-| TS SDK | Rust | 说明 |
+| TS SDK | Rust | Notes |
 |---|---|---|
-| `abortBash()` | 无(bash 的 abort 由调用方管 oneshot 通道) | 🟡 实现方式不同 |
-| `isBashRunning` (readonly) | 无 | ❌ 缺状态查询 |
+| `abortBash()` | none (bash abort is managed by the caller via a oneshot channel) | 🟡 different mechanism |
+| `isBashRunning` (readonly) | none | ❌ missing state query |
 
-## 7. 压缩 / retry / 上下文(❌ 缺口)
+## 7. Compaction / retry / context (❌ gap)
 
-| TS SDK | Rust | 说明 |
+| TS SDK | Rust | Notes |
 |---|---|---|
-| `abortCompaction()` | 无 | ❌ |
-| `setAutoRetryEnabled(b)` | 无 | ❌ retry 状态是 RPC 子进程独有(RpcSharedState) |
-| `autoRetryEnabled` (readonly) | 无 | ❌ 同上 |
-| `getContextUsage()` | 无 | ❌ 缺上下文用量查询 |
+| `abortCompaction()` | none | ❌ |
+| `setAutoRetryEnabled(b)` | none | ❌ retry state is RPC-subprocess-only (RpcSharedState) |
+| `autoRetryEnabled` (readonly) | none | ❌ same |
+| `getContextUsage()` | none | ❌ missing context usage query |
 
-## 7.5. SessionManager(✅ 已对齐)
+## 7.5. SessionManager (✅ aligned)
 
-pi-web-rust 通过 `pi::sdk::SessionIndex` + `pi::sdk::SessionMeta` + `pi::sdk::build_session_context` 接线。
+pi-web-rust wires this via `pi::sdk::SessionIndex` + `pi::sdk::SessionMeta` + `pi::sdk::build_session_context`.
 
-| TS SDK | Rust | 状态 |
+| TS SDK | Rust | Status |
 |---|---|---|
-| `SessionManager.listAll()` → `SessionInfo[]` | `SessionIndex::new().list_sessions(None)` → `Vec<SessionMeta>` | ✅ SessionMeta 含 first_message/parent_session_path/modified_ms |
-| `SessionManager.open(path).getEntries()` | `Session::open(path)` + `session.entries` 公开字段 | ✅ |
-| `buildSessionContext(entries, leafId, byId)` | `pi::sdk::build_session_context(entries, leaf_id, by_id)` → `SessionContextSnapshot` | ✅ 自由函数(leaf→root 走 parentId + compaction 截断) |
-| `resolveModelScopeWithDiagnostics(patterns, modelRuntime)` | `pi::sdk::resolve_model_scope_with_diagnostics(patterns, registry, allow_missing)` → `(Vec<ScopedModel>, Vec<String>)` | ✅ 返回结构化 diagnostics |
+| `SessionManager.listAll()` → `SessionInfo[]` | `SessionIndex::new().list_sessions(None)` → `Vec<SessionMeta>` | ✅ SessionMeta carries first_message/parent_session_path/modified_ms |
+| `SessionManager.open(path).getEntries()` | `Session::open(path)` + public `session.entries` field | ✅ |
+| `buildSessionContext(entries, leafId, byId)` | `pi::sdk::build_session_context(entries, leaf_id, by_id)` → `SessionContextSnapshot` | ✅ free function (leaf→root via parentId + compaction cut-off) |
+| `resolveModelScopeWithDiagnostics(patterns, modelRuntime)` | `pi::sdk::resolve_model_scope_with_diagnostics(patterns, registry, allow_missing)` → `(Vec<ScopedModel>, Vec<String>)` | ✅ returns structured diagnostics |
 | `getAgentDir()` | `Config::global_dir()` | ✅ |
 
-## 8. 设置 / 模型运行时(✅ 部分对齐)
+## 8. Settings / model runtime (✅ partially aligned)
 
-| TS SDK | Rust | 状态 |
+| TS SDK | Rust | Status |
 |---|---|---|
-| `settingsManager` (readonly) | 无 | ❌ 缺设置管理器 |
-| `modelRuntime` (readonly) | `agent.model_registry()` / `agent.auth_storage()` | ✅ 已加 pub getter |
+| `settingsManager` (readonly) | none | ❌ missing settings manager |
+| `modelRuntime` (readonly) | `agent.model_registry()` / `agent.auth_storage()` | ✅ pub getters added |
 
-## 9. 扩展系统(⏭️ 架构差异)
+## 9. Extension system (⏭️ architectural difference)
 
-TS SDK 有完整扩展系统(pi extensions),Rust 有另一套叫 extensions 的实现但接口不同。
-pi-web 的 skills/plugins/custom-ui 都走这层。
+The TS SDK has a full extension system (pi extensions); Rust has another implementation that
+also goes by "extensions" but with a different interface.
+pi-web's skills/plugins/custom-ui all ride on this layer.
 
-| TS SDK | Rust | 状态 |
+| TS SDK | Rust | Status |
 |---|---|---|
-| `extensionRunner` (readonly) | `extension_manager()` / `has_extensions()` | ⏭️ Rust 有但接口不同 |
-| `promptTemplates` (readonly) | 无 | ⏭️ |
-| `resourceLoader` (readonly) | 无 | ⏭️ |
-| `bindExtensions?` | 无 | ⏭️ |
+| `extensionRunner` (readonly) | `extension_manager()` / `has_extensions()` | ⏭️ Rust has it but the interface differs |
+| `promptTemplates` (readonly) | none | ⏭️ |
+| `resourceLoader` (readonly) | none | ⏭️ |
+| `bindExtensions?` | none | ⏭️ |
 
 ---
 
-## 对齐进度
+## Alignment progress
 
-| 类别 | 总数 | ✅ 已对齐 | ❌ 缺口 |
+| Category | Total | ✅ aligned | ❌ gap |
 |---|---|---|---|
-| 会话核心 | 16 | 16 | 0 |
-| 统计/bash/压缩 | 6 | 5 | 1(autoCompactionEnabled getter) |
-| 队列管理 | 4 | 0 | 4 |
-| 工具管理 | 3 | 0 | 3 |
-| 导航 | 1 | 0 | 1 |
-| bash 辅助 | 2 | 0 | 2 |
-| 压缩/retry/上下文 | 4 | 0 | 4 |
-| 设置/模型 | 2 | 1 | 1 |
-| 扩展(架构差异) | 4 | — | ⏭️ 跳过 |
-| **合计** | **42** | **22** | **16** |
+| Session core | 16 | 16 | 0 |
+| Stats/bash/compaction | 6 | 5 | 1 (autoCompactionEnabled getter) |
+| Queue management | 4 | 0 | 4 |
+| Tool management | 3 | 0 | 3 |
+| Navigation | 1 | 0 | 1 |
+| Bash helpers | 2 | 0 | 2 |
+| Compaction/retry/context | 4 | 0 | 4 |
+| Settings/model | 2 | 1 | 1 |
+| Extensions (architectural) | 4 | — | ⏭️ skipped |
+| **Total** | **42** | **22** | **16** |
 
-**已对齐率:52%**(22/42,不含架构差异项)。
+**Aligned rate: 52%** (22/42, excluding architectural-difference items).
 
-## fork 补齐记录(defims/pi_agent_rust)
+## Fork fill log (defims/pi_agent_rust)
 
-| commit | 方法 | 对齐的 TS SDK |
+| commit | methods | TS SDK aligned |
 |---|---|---|
 | `e178fb48` | get_session_stats / get_last_assistant_text / set_auto_compaction / compact_with_instructions | getSessionStats / getLastAssistantText / setAutoCompactionEnabled / compact |
 | `52d39dc3` | bash | executeBash |
-| `2595adae` | (macOS 类型修复,非方法补齐) | — |
-| `baee8763` | (删除 RPC-only 多余方法) | — |
-| `86e8cac6` | SessionMeta 扩展(first_message/parent_session_path/modified_ms) + build_session_context 自由函数 + sdk 导出 SessionIndex/SessionMeta | SessionManager.listAll / buildSessionContext |
+| `2595adae` | (macOS type fixes, not a method fill) | — |
+| `baee8763` | (removed RPC-only methods absent from the TS SDK AgentSessionLike) | — |
+| `86e8cac6` | SessionMeta extension (first_message/parent_session_path/modified_ms) + build_session_context free function + sdk exports SessionIndex/SessionMeta | SessionManager.listAll / buildSessionContext |
 | `adfdc96c` | resolve_model_scope_with_diagnostics + AgentSession model_registry()/auth_storage() getters | resolveModelScopeWithDiagnostics / modelRuntime readonly |
-| `36fdac58` | createAgentSessionServices / FromServices 拆分 | createAgentSessionServices / createAgentSessionFromServices |
+| `36fdac58` | createAgentSessionServices / FromServices split | createAgentSessionServices / createAgentSessionFromServices |
 
-## 追上游流程
+## Upstream tracking flow
 
 ```bash
-# 1. earendil-works/pi 发新版时,更新 AgentSessionLike 接口
-#    对照本文档 §1-9 检查新增/变更的方法
+# 1. When earendil-works/pi cuts a release, update the AgentSessionLike interface
+#    and check §1-9 of this document for added/changed methods
 
-# 2. 在本仓库(defims/pi_agent_rust)补齐缺口
-# 补方法到 src/sdk.rs 的 AgentSessionHandle impl 块
-cargo check --lib  # 验证
+# 2. Fill the gaps in this repository (defims/pi_agent_rust)
+# add methods to the AgentSessionHandle impl block in src/sdk.rs
+cargo check --lib  # verify
 
-# 3. push fork
+# 3. push the fork
 git push origin master:main
 
-# 4. 消费方 moho-mate(宿主仓库)更新 submodule + 验证
-cd <moho-mate 根目录>
+# 4. consumer moho-mate (host repo) updates the submodule + verifies
+cd <moho-mate root>
 git add pi-agent-rust
 cargo check
 ```
 
-## 相关文件
+## Related files
 
-- TS SDK 接口:上游 agegr/pi-web `lib/pi-types.ts`(`AgentSessionLike`;消费方 moho-mate 的 pi-web-rust submodule 内有此文件)
-- Rust handle:`src/sdk.rs`(`AgentSessionHandle` impl)
-- Rust 引擎核心:`src/agent.rs`(`AgentSession`)
-- RPC 路径(参考):`src/rpc.rs`(`RpcTransportClient`)
-- 详细签名:消费方 moho-mate 的 `docs/pi-sdk-probe-notes.md`
+- TS SDK interface: upstream agegr/pi-web `lib/pi-types.ts` (`AgentSessionLike`; a copy exists in the consumer moho-mate's pi-web-rust submodule)
+- Rust handle: `src/sdk.rs` (`AgentSessionHandle` impl)
+- Rust engine core: `src/agent.rs` (`AgentSession`)
+- RPC path (reference): `src/rpc.rs` (`RpcTransportClient`)
+- Detailed signatures: consumer moho-mate's `docs/pi-sdk-probe-notes.md`
+- 中文版: [sdk-mapping.zh-CN.md](./sdk-mapping.zh-CN.md)
