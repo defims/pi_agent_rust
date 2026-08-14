@@ -1,8 +1,8 @@
-# defims/pi_agent_rust ↔ earendil-works/pi Alignment
+# defims/picrab ↔ earendil-works/pi Alignment
 
 > **English (default)** · 中文版: [sdk-mapping.zh-CN.md](./sdk-mapping.zh-CN.md)
 >
-> `defims/pi_agent_rust` is the Rust version of the pi engine ([earendil-works/pi](https://github.com/earendil-works/pi),
+> `defims/picrab` is the Rust version of the pi engine ([earendil-works/pi](https://github.com/earendil-works/pi),
 > TypeScript SDK `@earendil-works/pi-coding-agent`), continuously tracking upstream.
 >
 > This document records the `AgentSession` interface differences between the two, serving as
@@ -10,7 +10,7 @@
 > upstream releases.
 >
 > - **Alignment target**: earendil-works/pi's `AgentSessionLike` interface (agegr/pi-web `lib/pi-types.ts`)
-> - **Aligned object**: defims/pi_agent_rust's `AgentSessionHandle` (in_process path, `src/sdk.rs`)
+> - **Aligned object**: defims/picrab's `AgentSessionHandle` (in_process path, `src/sdk.rs`)
 > - **Rust crate lib name**: `pi` (Cargo package name `pi_agent_rust`)
 
 ## Core rules
@@ -162,7 +162,7 @@ pi-web's skills/plugins/custom-ui all ride on this layer.
 
 **Aligned rate: 52%** (22/42, excluding architectural-difference items).
 
-## Fork fill log (defims/pi_agent_rust)
+## Fork fill log (defims/picrab)
 
 | commit | methods | TS SDK aligned |
 |---|---|---|
@@ -180,7 +180,7 @@ pi-web's skills/plugins/custom-ui all ride on this layer.
 # 1. When earendil-works/pi cuts a release, update the AgentSessionLike interface
 #    and check §1-9 of this document for added/changed methods
 
-# 2. Fill the gaps in this repository (defims/pi_agent_rust)
+# 2. Fill the gaps in this repository (defims/picrab)
 # add methods to the AgentSessionHandle impl block in src/sdk.rs
 cargo check --lib  # verify
 

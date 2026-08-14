@@ -1,15 +1,15 @@
-# defims/pi_agent_rust ↔ earendil-works/pi 对齐
+# defims/picrab ↔ earendil-works/pi 对齐
 
 > **中文版** · English (default): [sdk-mapping.md](./sdk-mapping.md)
 >
-> `defims/pi_agent_rust` 是 pi 引擎([earendil-works/pi](https://github.com/earendil-works/pi),
+> `defims/picrab` 是 pi 引擎([earendil-works/pi](https://github.com/earendil-works/pi),
 > TypeScript SDK `@earendil-works/pi-coding-agent`)的 Rust 版本,持续跟随上游。
 >
 > 本文档记录两者的 `AgentSession` 接口差异,作为补齐 in_process 方法、追上游 release
 > 时检测变更的基线。
 >
 > - **对齐基准**:earendil-works/pi 的 `AgentSessionLike` 接口(agegr/pi-web `lib/pi-types.ts`)
-> - **被对齐对象**:defims/pi_agent_rust 的 `AgentSessionHandle`(in_process 路径,`src/sdk.rs`)
+> - **被对齐对象**:defims/picrab 的 `AgentSessionHandle`(in_process 路径,`src/sdk.rs`)
 > - **Rust crate lib 名**:`pi`(Cargo 包名 `pi_agent_rust`)
 
 ## 核心规则
@@ -159,7 +159,7 @@ pi-web 的 skills/plugins/custom-ui 都走这层。
 
 **已对齐率:52%**(22/42,不含架构差异项)。
 
-## fork 补齐记录(defims/pi_agent_rust)
+## fork 补齐记录(defims/picrab)
 
 | commit | 方法 | 对齐的 TS SDK |
 |---|---|---|
@@ -177,7 +177,7 @@ pi-web 的 skills/plugins/custom-ui 都走这层。
 # 1. earendil-works/pi 发新版时,更新 AgentSessionLike 接口
 #    对照本文档 §1-9 检查新增/变更的方法
 
-# 2. 在本仓库(defims/pi_agent_rust)补齐缺口
+# 2. 在本仓库(defims/picrab)补齐缺口
 # 补方法到 src/sdk.rs 的 AgentSessionHandle impl 块
 cargo check --lib  # 验证
 
