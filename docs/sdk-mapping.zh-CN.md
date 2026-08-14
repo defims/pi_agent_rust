@@ -34,7 +34,7 @@
 
 ---
 
-## 1. 会话核心(✅ 已对齐)
+## 1. 会话核心(🟡 部分对齐)
 
 | TS SDK (`AgentSessionLike`) | Rust (`AgentSessionHandle`) | 说明 |
 |---|---|---|
@@ -48,12 +48,12 @@
 | `setThinkingLevel(level)` | `set_thinking_level(level)` | ✅ |
 | `setSessionName(name)` | `set_session_name(name)` | ✅ |
 | `compact(customInstructions?)` | `compact(on_event)` / `compact_with_instructions(instructions, on_event)` | ✅ fork 补了 instructions 版 |
-| `steer(text, images?)` | `steer(message)` | 🟡 Rust 缺 images 参数 |
-| `followUp(text, images?)` | `follow_up(message)` | 🟡 同上 |
+| `steer(text, images?)` | handle 上无(仅 RPC 路径:`RpcTransportClient::steer`) | ❌ |
+| `followUp(text, images?)` | handle 上无(仅 RPC 路径) | ❌ |
 | `sessionId` (readonly) | `session().session.lock().header.id` | 🟡 需 async 锁 |
 | `sessionFile` (readonly) | `session().session.lock()` 读文件路径 | 🟡 |
-| `isStreaming` (readonly) | `state().await.is_streaming` | 🟡 需 async |
-| `isCompacting` (readonly) | `state().await.is_compacting` | 🟡 |
+| `isStreaming` (readonly) | 无(`AgentSessionState` 无此字段,需经事件流追踪) | ❌ |
+| `isCompacting` (readonly) | 无(`AgentSessionState` 无此字段) | ❌ |
 
 ## 2. 统计 / bash / 压缩(✅ fork 已补)
 
@@ -64,7 +64,7 @@
 | `setAutoCompactionEnabled(b)` | `set_auto_compaction(b)` | ✅ fork commit e178fb48 |
 | `compact(customInstructions?)` | `compact_with_instructions(...)` | ✅ fork commit e178fb48 |
 | `executeBash(cmd, onChunk?, opts?)` | `bash(cmd, abort_rx)` | 🟡 fork commit 52d39dc3,参数形态不同(abort 用 oneshot,无 onChunk) |
-| `autoCompactionEnabled` (readonly) | 无(只能 set 不能 read) | ❌ 缺 getter |
+| `autoCompactionEnabled` (readonly) | 无(`AgentSessionState` 无此字段,只能 set) | ❌ 缺 getter |
 
 ## 3. 队列管理(❌ 缺口)
 
@@ -142,11 +142,19 @@ pi-web 的 skills/plugins/custom-ui 都走这层。
 
 ---
 
+## handle 独有方法(不在 AgentSessionLike 中)
+
+in_process handle 还暴露一批 TS SDK 没有的 Rust 侧方法:
+`messages()`、`state()`、`thinking()` / `thinking_level()`、`max_tokens()` / `set_max_tokens()`、
+`listeners()` / `listeners_mut()`、`session()` / `session_mut()`、`extension_manager()` /
+`has_extensions()` / `extension_region()`、`from_session_with_listeners()`。
+多为 RPC 名称镜像或 Rust 原生接线所需;属增量,不计入对齐。
+
 ## 对齐进度
 
 | 类别 | 总数 | ✅ 已对齐 | ❌ 缺口 |
 |---|---|---|---|
-| 会话核心 | 16 | 16 | 0 |
+| 会话核心 | 16 | 12 | 4(steer / followUp / isStreaming / isCompacting) |
 | 统计/bash/压缩 | 6 | 5 | 1(autoCompactionEnabled getter) |
 | 队列管理 | 4 | 0 | 4 |
 | 工具管理 | 3 | 0 | 3 |
@@ -155,9 +163,9 @@ pi-web 的 skills/plugins/custom-ui 都走这层。
 | 压缩/retry/上下文 | 4 | 0 | 4 |
 | 设置/模型 | 2 | 1 | 1 |
 | 扩展(架构差异) | 4 | — | ⏭️ 跳过 |
-| **合计** | **42** | **22** | **16** |
+| **合计** | **42** | **18** | **20** |
 
-**已对齐率:52%**(22/42,不含架构差异项)。
+**已对齐率:47%**(18/38 个计入项;扩展系统按架构差异不计)。
 
 ## fork 补齐记录(defims/picrab)
 
@@ -166,7 +174,7 @@ pi-web 的 skills/plugins/custom-ui 都走这层。
 | `e178fb48` | get_session_stats / get_last_assistant_text / set_auto_compaction / compact_with_instructions | getSessionStats / getLastAssistantText / setAutoCompactionEnabled / compact |
 | `52d39dc3` | bash | executeBash |
 | `2595adae` | (macOS 类型修复,非方法补齐) | — |
-| `baee8763` | (删除 RPC-only 多余方法) | — |
+| `baee8763` | (删除不在 AgentSessionLike 中的 RPC-only 方法:get_available_models / set_steering_mode / set_follow_up_mode / get_messages / get_state;steer/follow_up 仍只在 RPC 路径) | — |
 | `86e8cac6` | SessionMeta 扩展(first_message/parent_session_path/modified_ms) + build_session_context 自由函数 + sdk 导出 SessionIndex/SessionMeta | SessionManager.listAll / buildSessionContext |
 | `adfdc96c` | resolve_model_scope_with_diagnostics + AgentSession model_registry()/auth_storage() getters | resolveModelScopeWithDiagnostics / modelRuntime readonly |
 | `36fdac58` | createAgentSessionServices / FromServices 拆分 | createAgentSessionServices / createAgentSessionFromServices |

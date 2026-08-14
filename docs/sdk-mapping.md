@@ -36,7 +36,7 @@ requirements the fork must uphold while filling gaps / tracking upstream:
 
 ---
 
-## 1. Session core (✅ aligned)
+## 1. Session core (🟡 partially aligned)
 
 | TS SDK (`AgentSessionLike`) | Rust (`AgentSessionHandle`) | Notes |
 |---|---|---|
@@ -50,12 +50,12 @@ requirements the fork must uphold while filling gaps / tracking upstream:
 | `setThinkingLevel(level)` | `set_thinking_level(level)` | ✅ |
 | `setSessionName(name)` | `set_session_name(name)` | ✅ |
 | `compact(customInstructions?)` | `compact(on_event)` / `compact_with_instructions(instructions, on_event)` | ✅ fork added the instructions variant |
-| `steer(text, images?)` | `steer(message)` | 🟡 Rust lacks the images param |
-| `followUp(text, images?)` | `follow_up(message)` | 🟡 same |
+| `steer(text, images?)` | none on the handle (RPC path only: `RpcTransportClient::steer`) | ❌ |
+| `followUp(text, images?)` | none on the handle (RPC path only) | ❌ |
 | `sessionId` (readonly) | `session().session.lock().header.id` | 🟡 needs an async lock |
 | `sessionFile` (readonly) | `session().session.lock()` reads the file path | 🟡 |
-| `isStreaming` (readonly) | `state().await.is_streaming` | 🟡 needs await |
-| `isCompacting` (readonly) | `state().await.is_compacting` | 🟡 |
+| `isStreaming` (readonly) | none (`AgentSessionState` has no such field; must be tracked via events) | ❌ |
+| `isCompacting` (readonly) | none (`AgentSessionState` has no such field) | ❌ |
 
 ## 2. Stats / bash / compaction (✅ filled by the fork)
 
@@ -66,7 +66,7 @@ requirements the fork must uphold while filling gaps / tracking upstream:
 | `setAutoCompactionEnabled(b)` | `set_auto_compaction(b)` | ✅ fork commit e178fb48 |
 | `compact(customInstructions?)` | `compact_with_instructions(...)` | ✅ fork commit e178fb48 |
 | `executeBash(cmd, onChunk?, opts?)` | `bash(cmd, abort_rx)` | 🟡 fork commit 52d39dc3; different param shape (abort via oneshot, no onChunk) |
-| `autoCompactionEnabled` (readonly) | none (set-only, no read) | ❌ missing getter |
+| `autoCompactionEnabled` (readonly) | none (`AgentSessionState` has no such field; set-only) | ❌ missing getter |
 
 ## 3. Queue management (❌ gap)
 
@@ -145,11 +145,19 @@ pi-web's skills/plugins/custom-ui all ride on this layer.
 
 ---
 
+## Handle-only extras (not in AgentSessionLike)
+
+The in_process handle also exposes Rust-side additions with no TS SDK counterpart:
+`messages()`, `state()`, `thinking()` / `thinking_level()`, `max_tokens()` / `set_max_tokens()`,
+`listeners()` / `listeners_mut()`, `session()` / `session_mut()`, `extension_manager()` /
+`has_extensions()` / `extension_region()`, `from_session_with_listeners()`. They mirror RPC
+names or serve Rust-native wiring; additive, not counted in alignment.
+
 ## Alignment progress
 
 | Category | Total | ✅ aligned | ❌ gap |
 |---|---|---|---|
-| Session core | 16 | 16 | 0 |
+| Session core | 16 | 12 | 4 (steer / followUp / isStreaming / isCompacting) |
 | Stats/bash/compaction | 6 | 5 | 1 (autoCompactionEnabled getter) |
 | Queue management | 4 | 0 | 4 |
 | Tool management | 3 | 0 | 3 |
@@ -158,9 +166,9 @@ pi-web's skills/plugins/custom-ui all ride on this layer.
 | Compaction/retry/context | 4 | 0 | 4 |
 | Settings/model | 2 | 1 | 1 |
 | Extensions (architectural) | 4 | — | ⏭️ skipped |
-| **Total** | **42** | **22** | **16** |
+| **Total** | **42** | **18** | **20** |
 
-**Aligned rate: 52%** (22/42, excluding architectural-difference items).
+**Aligned rate: 47%** (18/38 counted items; extension-system items excluded as architectural).
 
 ## Fork fill log (defims/picrab)
 
@@ -169,7 +177,7 @@ pi-web's skills/plugins/custom-ui all ride on this layer.
 | `e178fb48` | get_session_stats / get_last_assistant_text / set_auto_compaction / compact_with_instructions | getSessionStats / getLastAssistantText / setAutoCompactionEnabled / compact |
 | `52d39dc3` | bash | executeBash |
 | `2595adae` | (macOS type fixes, not a method fill) | — |
-| `baee8763` | (removed RPC-only methods absent from the TS SDK AgentSessionLike) | — |
+| `baee8763` | (removed RPC-only methods absent from AgentSessionLike: get_available_models / set_steering_mode / set_follow_up_mode / get_messages / get_state; steer/follow_up remain RPC-only) | — |
 | `86e8cac6` | SessionMeta extension (first_message/parent_session_path/modified_ms) + build_session_context free function + sdk exports SessionIndex/SessionMeta | SessionManager.listAll / buildSessionContext |
 | `adfdc96c` | resolve_model_scope_with_diagnostics + AgentSession model_registry()/auth_storage() getters | resolveModelScopeWithDiagnostics / modelRuntime readonly |
 | `36fdac58` | createAgentSessionServices / FromServices split | createAgentSessionServices / createAgentSessionFromServices |
