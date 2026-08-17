@@ -1204,11 +1204,87 @@ pub(crate) fn model_requires_configured_credential(entry: &ModelEntry) -> bool {
 }
 
 pub(crate) fn model_entry_is_ready(entry: &ModelEntry) -> bool {
-    !model_requires_configured_credential(entry)
-        || entry
-            .api_key
-            .as_ref()
-            .is_some_and(|value| !value.trim().is_empty())
+    if !model_requires_configured_credential(entry) {
+        // Exempt from the generic bearer-key preflight, but "ready" still means
+        // credentials exist for providers whose entire credential surface is a
+        // structured chain (TS hasConfiguredAuth parity: bedrock stays out of
+        // getAvailable() until an AWS credential lane exists —
+        // pi-ai/env-api-keys.js:161-172). Without this, the fallback preference
+        // table picks bedrock on machines with no AWS credentials and the first
+        // request fails with an auth error.
+        let canonical = canonical_provider_id(&entry.model.provider)
+            .unwrap_or(entry.model.provider.as_str());
+        if canonical.eq_ignore_ascii_case("amazon-bedrock") {
+            return bedrock_credential_present_with(entry, |var| std::env::var(var).ok());
+        }
+        // Same availability rule for the other structured-credential adapter:
+        // sap-ai-core stays out of getAvailable() until its service-key chain
+        // (env vars or stored auth.json credentials) resolves.
+        if canonical.eq_ignore_ascii_case("sap-ai-core") {
+            return sap_credential_present_with(|var| std::env::var(var).ok())
+                || {
+                    let auth = AuthStorage::load(crate::config::Config::auth_path()).ok();
+                    let mut env = |var: &str| std::env::var(var).ok();
+                    crate::auth::resolve_sap_credentials_with_env_lookup(auth.as_ref(), &mut env)
+                        .is_some()
+                };
+        }
+        return true;
+    }
+    entry
+        .api_key
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+/// sap-ai-core availability: env lanes only (parameterized for tests). The
+/// stored-auth.json lane is checked separately at the call site.
+fn sap_credential_present_with<F>(mut env: F) -> bool
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    crate::auth::resolve_sap_credentials_with_env_lookup(None, &mut env).is_some()
+}
+
+/// Bedrock availability (TS env-api-keys.js:161-172 parity): an explicit
+/// models.json apiKey, the presence of any AWS credential-lane environment
+/// variable, or stored AWS credentials in auth.json. Lane presence alone
+/// counts — the provider resolves (and reports) invalid chains at request
+/// time, exactly like the TS `getEnvApiKey("amazon-bedrock")` sentinel.
+fn bedrock_credential_present_with<F>(entry: &ModelEntry, mut env: F) -> bool
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if entry
+        .api_key
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+    let mut present = |var: &str| env(var).is_some_and(|value| !value.trim().is_empty());
+    // Presence lanes: named profiles, bearer token, container/IRSA routing.
+    if [
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+    ]
+    .iter()
+    .any(|var| present(var))
+    {
+        return true;
+    }
+    // Sigv4 lane needs the full pair.
+    if present("AWS_ACCESS_KEY_ID") && present("AWS_SECRET_ACCESS_KEY") {
+        return true;
+    }
+    // Stored AWS credentials in auth.json (chain steps 4/5). Closed env so
+    // file-based profile resolution is not re-run against ambient variables.
+    let auth = AuthStorage::load(crate::config::Config::auth_path()).ok();
+    crate::auth::resolve_aws_credentials_with_env_lookup(auth.as_ref(), &mut |_| None).is_some()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7256,6 +7332,9 @@ mod tests {
 
     #[test]
     fn request_time_auth_providers_are_not_blocked_by_generic_api_key_preflight() {
+        // Bedrock: exempt from the generic bearer-key preflight (still true),
+        // but readiness now requires an AWS credential lane (TS
+        // hasConfiguredAuth parity — see bedrock_readiness_requires_lane).
         let bedrock = ad_hoc_model_entry_with_sap_resolver(
             "bedrock",
             "anthropic.claude-3-5-sonnet-20240620-v1:0",
@@ -7263,7 +7342,6 @@ mod tests {
         )
         .expect("bedrock ad-hoc entry");
         assert!(!model_requires_configured_credential(&bedrock));
-        assert!(model_entry_is_ready(&bedrock));
 
         let sap = ad_hoc_model_entry_with_sap_resolver("sap-ai-core", "deployment-a", || {
             Some(SapResolvedCredentials {
@@ -7276,7 +7354,88 @@ mod tests {
         })
         .expect("sap ad-hoc entry");
         assert!(!model_requires_configured_credential(&sap));
-        assert!(model_entry_is_ready(&sap));
+        // readiness 已改按真实凭证链判定(见 sap_readiness_requires_lane);
+        // 本测试只锁 preflight 豁免语义。
+    }
+
+    #[test]
+    fn sap_readiness_requires_credential_lane() {
+        // 结构化凭证 provider 的可用性口径与 bedrock 一致:服务键链
+        // (AICORE_SERVICE_KEY / 四 env 变量 / 存储 auth.json)解析成功才 ready。
+        assert!(!sap_credential_present_with(|_| None));
+        // 四变量齐全 → ready
+        assert!(sap_credential_present_with(|var| match var {
+            "SAP_AI_CORE_CLIENT_ID" => Some("id".to_string()),
+            "SAP_AI_CORE_CLIENT_SECRET" => Some("secret".to_string()),
+            "SAP_AI_CORE_TOKEN_URL" => Some("https://auth.sap.example/token".to_string()),
+            "SAP_AI_CORE_SERVICE_URL" => Some("https://api.ai.sap.example".to_string()),
+            _ => None,
+        }));
+        // 只有三缺一 → not ready
+        assert!(!sap_credential_present_with(|var| match var {
+            "SAP_AI_CORE_CLIENT_ID" => Some("id".to_string()),
+            "SAP_AI_CORE_CLIENT_SECRET" => Some("secret".to_string()),
+            "SAP_AI_CORE_TOKEN_URL" => Some("https://auth.sap.example/token".to_string()),
+            _ => None,
+        }));
+    }
+
+    #[test]
+    fn bedrock_readiness_requires_credential_lane() {
+        // TS parity (pi-ai/env-api-keys.js:161-172 + model-registry
+        // hasConfiguredAuth): bedrock enters getAvailable() only when a
+        // credential lane exists. Env injection is parameterized to keep the
+        // test free of std::env mutation races.
+        let bedrock = ad_hoc_model_entry_with_sap_resolver(
+            "bedrock",
+            "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            || None,
+        )
+        .expect("bedrock ad-hoc entry");
+
+        // No lane at all → not ready (previously always-ready; the fallback
+        // preference table then selected bedrock on credential-less machines).
+        assert!(!bedrock_credential_present_with(&bedrock, |_| None));
+
+        // Bearer lane → ready.
+        assert!(bedrock_credential_present_with(&bedrock, |var| {
+            (var == "AWS_BEARER_TOKEN_BEDROCK").then(|| "token".to_string())
+        }));
+
+        // Sigv4 pair → ready; access key without secret → not ready.
+        assert!(bedrock_credential_present_with(&bedrock, |var| match var {
+            "AWS_ACCESS_KEY_ID" => Some("ak".to_string()),
+            "AWS_SECRET_ACCESS_KEY" => Some("sk".to_string()),
+            _ => None,
+        }));
+        assert!(!bedrock_credential_present_with(&bedrock, |var| {
+            (var == "AWS_ACCESS_KEY_ID").then(|| "ak".to_string())
+        }));
+
+        // Profile lane → ready.
+        assert!(bedrock_credential_present_with(&bedrock, |var| {
+            (var == "AWS_PROFILE").then(|| "default".to_string())
+        }));
+
+        // Container/IRSA routing lanes → ready (credentials fetched at request
+        // time; presence of the routing variable is the availability signal).
+        for lane in [
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+        ] {
+            assert!(
+                bedrock_credential_present_with(&bedrock, |var| {
+                    (var == lane).then(|| "lane".to_string())
+                }),
+                "{lane} should count as a credential lane"
+            );
+        }
+
+        // Region alone is not a credential lane.
+        assert!(!bedrock_credential_present_with(&bedrock, |var| {
+            (var == "AWS_REGION").then(|| "us-east-1".to_string())
+        }));
     }
 
     #[test]
