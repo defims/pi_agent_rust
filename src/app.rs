@@ -632,8 +632,14 @@ pub fn select_model_and_thinking(
             .and_then(parse_thinking_level_opt);
     }
 
+    // Default "medium" matches upstream pi (TS DEFAULT_THINKING_LEVEL,
+    // coding-agent dist/core/defaults.js). The previous XHigh default made
+    // every reasoning-capable custom provider start at maximum thinking when
+    // the caller left the level unspecified — heavier requests and, via some
+    // gateways, runs that never settle (turn finished on the event line while
+    // the prompt future stayed pending).
     let thinking_level =
-        model_entry.clamp_thinking_level(thinking_level.unwrap_or(model::ThinkingLevel::XHigh));
+        model_entry.clamp_thinking_level(thinking_level.unwrap_or(model::ThinkingLevel::Medium));
 
     Ok(ModelSelection {
         model_entry,
