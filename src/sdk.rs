@@ -297,6 +297,10 @@ pub struct SessionOptions {
     pub working_directory: Option<PathBuf>,
     pub no_session: bool,
     pub session_path: Option<PathBuf>,
+    /// Models registry override (test isolation): load ModelRegistry from this
+    /// path instead of the global default. Auth storage paths stay global —
+    /// upstream `ModelRuntime.create({modelsPath})` semantics.
+    pub models_path: Option<PathBuf>,
     pub session_dir: Option<PathBuf>,
     pub extension_paths: Vec<PathBuf>,
     pub extension_policy: Option<String>,
@@ -351,6 +355,7 @@ impl Default for SessionOptions {
             working_directory: None,
             no_session: true,
             session_path: None,
+            models_path: None,
             session_dir: None,
             extension_paths: Vec::new(),
             extension_policy: None,
@@ -1887,7 +1892,10 @@ pub async fn create_agent_session_services(
     let mut auth = AuthStorage::load_async(Config::auth_path()).await?;
     auth.refresh_expired_oauth_tokens().await?;
     let global_dir = Config::global_dir();
-    let models_path = default_models_path(&global_dir);
+    let models_path = options
+        .models_path
+        .clone()
+        .unwrap_or_else(|| default_models_path(&global_dir));
     let model_registry = ModelRegistry::load(&auth, Some(models_path));
 
     Ok(AgentSessionServices {
