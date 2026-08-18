@@ -1233,6 +1233,27 @@ impl AgentSessionHandle {
             .await
     }
 
+    /// Prompt with inline images (text + image content blocks).
+    pub async fn prompt_images_with_abort(
+        &mut self,
+        input: impl Into<String>,
+        images: Vec<ImageContent>,
+        abort_signal: AbortSignal,
+        on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
+    ) -> Result<AssistantMessage> {
+        let mut blocks = vec![ContentBlock::Text(TextContent {
+            text: input.into(),
+            text_signature: None,
+        })];
+        for image in images {
+            blocks.push(ContentBlock::Image(image));
+        }
+        let combined = self.make_combined_callback(on_event);
+        self.session
+            .run_with_content_with_abort(blocks, Some(abort_signal), combined)
+            .await
+    }
+
     /// Continue the current agent loop without adding a new user prompt.
     ///
     /// This is useful for retry/continuation flows where session history or
