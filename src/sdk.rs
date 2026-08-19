@@ -301,6 +301,11 @@ pub struct SessionOptions {
     /// path instead of the global default. Auth storage paths stay global —
     /// upstream `ModelRuntime.create({modelsPath})` semantics.
     pub models_path: Option<PathBuf>,
+    /// Skills injection face (upstream `options.resourceLoader` parity):
+    /// None = auto-load from four sources (TS sdk.js:88-106 default behavior);
+    /// Some(vec![]) = no skills (bare sessions: test commands, health checks);
+    /// Some(skills) = use these (tests inject without disk).
+    pub skills: Option<Vec<crate::resources::Skill>>,
     pub session_dir: Option<PathBuf>,
     pub extension_paths: Vec<PathBuf>,
     pub extension_policy: Option<String>,
@@ -356,6 +361,7 @@ impl Default for SessionOptions {
             no_session: true,
             session_path: None,
             models_path: None,
+            skills: None,
             session_dir: None,
             extension_paths: Vec::new(),
             extension_policy: None,
@@ -1963,11 +1969,52 @@ pub async fn create_agent_session_from_services(
         .map(String::as_str)
         .collect::<Vec<_>>();
 
+    // Skills into session prompt (upstream TS sdk.js:88-106 parity — the Rust
+    // port left ResourceLoader in the CLI layer, so the SDK never passed
+    // skills_prompt; this converges toward the TS reference):
+    // - explicit Some(skills) = use as-is (injection face)
+    // - Some(vec![]) = no skills (bare session opt-out)
+    // - None = auto-load from the four sources (project/user skills dirs +
+    //   settings-configured paths); formatted into the skills_prompt slot
+    //   only when the read tool is enabled (CLI guard, main.rs:1551 parity).
+    let skills_prompt: Option<String> = match &options.skills {
+        Some(skills) if !skills.is_empty() && (enabled_tools.is_empty() || enabled_tools.contains(&"read")) => {
+            Some(crate::resources::format_skills_for_prompt(skills))
+        }
+        Some(_) => None,
+        None => {
+            if enabled_tools.is_empty() || enabled_tools.contains(&"read") {
+                let skill_paths: Vec<PathBuf> = config
+                    .skills
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect();
+                let loaded = crate::resources::load_skills(
+                    crate::resources::LoadSkillsOptions {
+                        cwd: cwd.clone(),
+                        agent_dir: global_dir.clone(),
+                        skill_paths,
+                        include_defaults: true,
+                    },
+                );
+                if loaded.skills.is_empty() {
+                    None
+                } else {
+                    Some(crate::resources::format_skills_for_prompt(&loaded.skills))
+                }
+            } else {
+                None
+            }
+        }
+    };
+
     let system_prompt = app::build_system_prompt(
         cli,
         cwd,
         &enabled_tools,
-        None,
+        skills_prompt.as_deref(),
         global_dir,
         &package_dir,
         std::env::var_os("PI_TEST_MODE").is_some(),
