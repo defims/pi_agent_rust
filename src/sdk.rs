@@ -307,7 +307,14 @@ pub struct SessionOptions {
     /// Some(skills) = use these (tests inject without disk).
     pub skills: Option<Vec<crate::resources::Skill>>,
     pub session_dir: Option<PathBuf>,
+    /// Explicit extension sources (CLI `-e` parity). When non-empty these
+    /// win and auto-discovery is skipped.
     pub extension_paths: Vec<PathBuf>,
+    /// Auto-discover extensions when `extension_paths` is empty (upstream
+    /// `createAgentSession` DefaultResourceLoader parity): settings package
+    /// sources + auto-discovered extension dirs. Mirrors the CLI default;
+    /// set `true` only for bare sessions (mirrors `--no-extensions`).
+    pub no_extensions: bool,
     pub extension_policy: Option<String>,
     pub repair_policy: Option<String>,
     pub include_cwd_in_prompt: bool,
@@ -364,6 +371,7 @@ impl Default for SessionOptions {
             skills: None,
             session_dir: None,
             extension_paths: Vec::new(),
+            no_extensions: false,
             extension_policy: None,
             repair_policy: None,
             include_cwd_in_prompt: true,
@@ -2075,12 +2083,30 @@ pub async fn create_agent_session_from_services(
     );
     agent_session.set_api_key_override(options.api_key.clone());
 
-    if !options.extension_paths.is_empty() {
-        let extension_paths = options
+    // Extension sources: explicit paths win; otherwise auto-discover
+    // (upstream createAgentSession DefaultResourceLoader parity — same
+    // rule the skills auto-load applies). Discovery is light (packages
+    // fast path + auto dirs; no installs, no network); sources needing
+    // install degrade to absent.
+    let discovered_extensions = if options.extension_paths.is_empty() && !options.no_extensions {
+        crate::package_manager::PackageManager::new(cwd.to_path_buf())
+            .discover_extensions_blocking()
+    } else {
+        Vec::new()
+    };
+    let extension_paths = if options.extension_paths.is_empty() {
+        discovered_extensions
+            .into_iter()
+            .map(|path| resolve_path_for_cwd(&path, cwd))
+            .collect::<Vec<_>>()
+    } else {
+        options
             .extension_paths
             .iter()
             .map(|path| resolve_path_for_cwd(path, cwd))
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    };
+    if !extension_paths.is_empty() {
         let resolved_ext_policy =
             config.resolve_extension_policy_with_metadata(options.extension_policy.as_deref());
         let resolved_repair_policy =
