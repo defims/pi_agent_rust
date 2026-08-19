@@ -1999,6 +1999,7 @@ pub async fn create_agent_session_from_services(
                         include_defaults: true,
                     },
                 );
+               
                 if loaded.skills.is_empty() {
                     None
                 } else {
