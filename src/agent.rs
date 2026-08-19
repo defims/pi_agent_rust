@@ -8254,6 +8254,33 @@ impl crate::extensions::ExtensionSession for AgentExtensionSession {
     }
 }
 
+/// Compaction result info surfaced to embedders (upstream RPC
+/// compaction_result payload: summary + tokensBefore/estimatedTokensAfter).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CompactionResultInfo {
+    pub summary: String,
+    pub first_kept_entry_id: String,
+    pub tokens_before: u64,
+    /// Post-compaction context estimate (summary + kept messages), same
+    /// estimation chain as `tokens_before`.
+    pub estimated_tokens_after: u64,
+    pub details: Option<serde_json::Value>,
+}
+
+impl CompactionResultInfo {
+    /// No-op compaction result (disabled / nothing to compact / cancelled
+    /// by extension policy).
+    fn no_op() -> Self {
+        Self {
+            summary: String::new(),
+            first_kept_entry_id: String::new(),
+            tokens_before: 0,
+            estimated_tokens_after: 0,
+            details: None,
+        }
+    }
+}
+
 impl AgentSession {
     pub const fn runtime_repair_mode_from_policy_mode(mode: RepairPolicyMode) -> RepairMode {
         match mode {
@@ -8734,11 +8761,30 @@ impl AgentSession {
         self.save_enabled
     }
 
+    /// Graceful shutdown for embedders evicting a session: stop extension
+    /// runtimes, then drain the write-behind autosave queue (CLI main.rs
+    /// shutdown path lifted onto the session face). Without this flush,
+    /// dropping an idle session loses coalesced-but-unpersisted messages.
+    pub async fn shutdown(&mut self) -> Result<()> {
+        if let Some(ref ext) = self.extensions {
+            ext.shutdown().await;
+        }
+        if self.save_enabled {
+            let cx = crate::agent_cx::AgentCx::for_request();
+            if let Ok(mut guard) =
+                OwnedMutexGuard::lock(Arc::clone(&self.session), cx.cx()).await
+            {
+                guard.flush_autosave_on_shutdown().await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Force-run compaction synchronously (used by `/compact` slash command).
     pub async fn compact_now(
         &mut self,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
-    ) -> Result<()> {
+    ) -> Result<CompactionResultInfo> {
         self.compact_synchronous(Arc::new(on_event)).await
     }
 
@@ -9057,9 +9103,9 @@ impl AgentSession {
     }
 
     /// Run compaction synchronously (inline), blocking until completion.
-    async fn compact_synchronous(&self, on_event: AgentEventHandler) -> Result<()> {
+    async fn compact_synchronous(&self, on_event: AgentEventHandler) -> Result<CompactionResultInfo> {
         if !self.compaction_settings.enabled {
-            return Ok(());
+            return Ok(CompactionResultInfo::no_op());
         }
 
         let (entries, preparation) = {
@@ -9104,6 +9150,7 @@ impl AgentSession {
                 ));
                 self.extensions_is_compacting
                     .store(true, std::sync::atomic::Ordering::SeqCst);
+                let tokens_before = compaction.tokens_before;
                 let apply_result = self
                     .apply_compaction_entry(
                         compaction.summary,
@@ -9122,7 +9169,11 @@ impl AgentSession {
                     will_retry: false,
                     error_message: None,
                 });
-                return Ok(());
+                return Ok(CompactionResultInfo {
+                    tokens_before,
+                    estimated_tokens_after: self.estimate_current_path_tokens().await,
+                    ..CompactionResultInfo::no_op()
+                });
             }
             self.extensions_is_compacting
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -9141,8 +9192,19 @@ impl AgentSession {
 
             match compaction_result {
                 Ok(result) => {
+                    let info = CompactionResultInfo {
+                        summary: result.summary.clone(),
+                        first_kept_entry_id: result.first_kept_entry_id.clone(),
+                        tokens_before: result.tokens_before,
+                        estimated_tokens_after: 0,
+                        details: None,
+                    };
                     self.apply_compaction_result(result, Arc::clone(&on_event))
                         .await?;
+                    return Ok(CompactionResultInfo {
+                        estimated_tokens_after: self.estimate_current_path_tokens().await,
+                        ..info
+                    });
                 }
                 Err(e) => {
                     on_event(AgentEvent::AutoCompactionEnd {
@@ -9155,7 +9217,17 @@ impl AgentSession {
                 }
             }
         }
-        Ok(())
+        Ok(CompactionResultInfo::no_op())
+    }
+
+    /// Post-compaction context estimate (summary + kept messages) from the
+    /// session's current path; 0 when the session lock is unavailable.
+    async fn estimate_current_path_tokens(&self) -> u64 {
+        let cx = crate::agent_cx::AgentCx::for_request();
+        match self.session.lock(cx.cx()).await {
+            Ok(guard) => compaction::estimate_current_path_tokens(&guard),
+            Err(_) => 0,
+        }
     }
 
     fn resolve_extension_policy_for_enable(

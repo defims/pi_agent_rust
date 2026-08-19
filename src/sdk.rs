@@ -1475,10 +1475,11 @@ impl AgentSessionHandle {
     }
 
     /// Trigger an immediate compaction pass (if compaction is enabled).
+    /// Returns token statistics (summary, firstKeptEntryId, tokensBefore).
     pub async fn compact(
         &mut self,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
-    ) -> Result<()> {
+    ) -> Result<crate::agent::CompactionResultInfo> {
         self.session.compact_now(on_event).await
     }
 
@@ -1490,12 +1491,19 @@ impl AgentSessionHandle {
         &mut self,
         custom_instructions: Option<&str>,
         on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
-    ) -> Result<()> {
+    ) -> Result<crate::agent::CompactionResultInfo> {
         // AgentSession::compact_now doesn't accept instructions yet; when
         // provided we fall back to plain compact (instructions ignored).
         // TODO: thread instructions through once AgentSession supports them.
         let _ = custom_instructions;
         self.session.compact_now(on_event).await
+    }
+
+    /// Graceful shutdown: stop extension runtimes and flush the write-behind
+    /// autosave queue so the session can be dropped (e.g. idle eviction)
+    /// without losing messages.
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.session.shutdown().await
     }
 
     /// Return session-level token/message aggregates for the current path.
