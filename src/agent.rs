@@ -1169,6 +1169,12 @@ impl Agent {
         &self.messages
     }
 
+    /// Base tool registry (get_tools RPC face: names + descriptions).
+    #[must_use]
+    pub fn tools(&self) -> &ToolRegistry {
+        &self.tools
+    }
+
     /// Clear the message history.
     pub fn clear_messages(&mut self) {
         self.messages.clear();
