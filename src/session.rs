@@ -1359,14 +1359,19 @@ fn save_jsonl_full_rewrite_blocking(
     persist_jsonl_snapshot_locked(path, &header_to_write, &entries_to_write)?;
     let mut entries_for_stats = entries_to_write.clone();
     let finalized = finalize_loaded_entries(&mut entries_for_stats);
-    let message_count = finalized.message_count;
-    let session_name = finalized.name;
+    let (message_count, session_name, first_message, activity_ms) = {
+        let (count, name, first, activity) =
+            crate::session_index::session_stats(&entries_for_stats);
+        (count, name.or(finalized.name), first, activity)
+    };
     enqueue_session_index_snapshot_update(
         sessions_root,
         path,
         &header_to_write,
         message_count,
         session_name,
+        first_message,
+        activity_ms,
     );
     Ok((header_to_write, entries_to_write))
 }
@@ -1513,12 +1518,19 @@ fn append_jsonl_entries_blocking(
         persisted_entries
     };
 
+    let (message_count, session_name, first_message, activity_ms) = {
+        let (count, name, first, activity) =
+            crate::session_index::session_stats(&persisted_entries);
+        (count, name, first, activity)
+    };
     enqueue_session_index_snapshot_update(
         sessions_root,
         path,
         &disk_session.header,
         message_count,
         session_name,
+        first_message,
+        activity_ms,
     );
     Ok((disk_session.header, persisted_entries))
 }
@@ -4448,14 +4460,18 @@ impl Session {
                 }
 
                 let sessions_root = session_dir_clone.unwrap_or_else(Config::sessions_dir);
+                let (_, stats_name, stats_first, stats_activity) =
+                    crate::session_index::session_stats(&self.entries);
                 let message_count = self.cached_message_count;
-                let session_name = self.cached_name.clone();
+                let session_name = self.cached_name.clone().or(stats_name);
                 enqueue_session_index_snapshot_update(
                     &sessions_root,
                     &path_clone,
                     &self.header,
                     message_count,
                     session_name,
+                    stats_first,
+                    stats_activity,
                 );
             }
         }

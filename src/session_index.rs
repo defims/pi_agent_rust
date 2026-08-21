@@ -86,6 +86,8 @@ impl SessionIndex {
         header: &SessionHeader,
         message_count: u64,
         name: Option<String>,
+        first_message: String,
+        activity_ms: i64,
     ) -> Result<()> {
         let (last_modified_ms, size_bytes) = session_file_stats(path)?;
         let meta = SessionMeta {
@@ -97,9 +99,9 @@ impl SessionIndex {
             last_modified_ms,
             size_bytes,
             name,
-            first_message: "(no messages)".to_string(),
+            first_message,
             parent_session_path: header.parent_session.clone(),
-            modified_ms: 0,
+            modified_ms: derive_modified_ms(activity_ms, header, last_modified_ms),
         };
         self.upsert_meta(meta)
     }
@@ -455,6 +457,8 @@ pub(crate) fn enqueue_session_index_snapshot_update(
     header: &SessionHeader,
     message_count: u64,
     name: Option<String>,
+    first_message: String,
+    activity_ms: i64,
 ) {
     let sessions_root = sessions_root.to_path_buf();
     let path = path.to_path_buf();
@@ -465,6 +469,8 @@ pub(crate) fn enqueue_session_index_snapshot_update(
         &header,
         message_count,
         name,
+        first_message,
+        activity_ms,
     ) {
         tracing::warn!(
             sessions_root = %sessions_root.display(),
@@ -625,6 +631,15 @@ fn row_to_meta(row: &sqlmodel_core::Row) -> Result<SessionMeta> {
     })
 }
 
+/// modified = 最后消息活动时间;无活动回退 header 时间戳,再回退文件 mtime。
+fn derive_modified_ms(activity_ms: i64, header: &SessionHeader, last_modified_ms: i64) -> i64 {
+    if activity_ms > 0 {
+        activity_ms
+    } else {
+        parse_iso_to_millis(&header.timestamp).unwrap_or(last_modified_ms)
+    }
+}
+
 fn build_meta(
     path: &Path,
     header: &SessionHeader,
@@ -633,7 +648,7 @@ fn build_meta(
     header
         .validate()
         .map_err(|reason| Error::session(format!("Invalid session header: {reason}")))?;
-    let (message_count, name, _, _) = session_stats(entries);
+    let (message_count, name, first_message, activity_ms) = session_stats(entries);
     let (last_modified_ms, size_bytes) = session_file_stats(path)?;
     Ok(SessionMeta {
         path: path.display().to_string(),
@@ -644,9 +659,9 @@ fn build_meta(
         last_modified_ms,
         size_bytes,
         name,
-        first_message: "(no messages)".to_string(),
+        first_message,
         parent_session_path: header.parent_session.clone(),
-        modified_ms: parse_iso_to_millis(&header.timestamp).unwrap_or(last_modified_ms),
+        modified_ms: derive_modified_ms(activity_ms, header, last_modified_ms),
     })
 }
 
@@ -863,7 +878,7 @@ fn build_meta_from_sqlite(path: &Path) -> Result<SessionMeta> {
     })
 }
 
-fn session_stats<T>(entries: &[T]) -> (u64, Option<String>, String, i64)
+pub(crate) fn session_stats<T>(entries: &[T]) -> (u64, Option<String>, String, i64)
 where
     T: Borrow<SessionEntry>,
 {
@@ -1683,7 +1698,7 @@ mod tests {
         let index = SessionIndex::for_sessions_root(&root);
         let header = make_header("sqlite-id", "sqlite-cwd");
         index
-            .index_session_snapshot(&path, &header, 3, Some("sqlite session".to_string()))
+            .index_session_snapshot(&path, &header, 3, Some("sqlite session".to_string()), "(no messages)".to_string(), 0)
             .expect("index sqlite snapshot");
 
         let listed = index
@@ -1715,6 +1730,8 @@ mod tests {
             &header,
             3,
             Some("Queued Session".to_string()),
+            "(no messages)".to_string(),
+            0,
         );
 
         let index = SessionIndex::for_sessions_root(&root);
@@ -2639,7 +2656,7 @@ mod tests {
 
         let header = make_header("id-overflow", "cwd-overflow");
         let err = index
-            .index_session_snapshot(&path, &header, (i64::MAX as u64) + 1, None)
+            .index_session_snapshot(&path, &header, (i64::MAX as u64) + 1, None, "(no messages)".to_string(), 0)
             .expect_err("out-of-range message_count should error");
         assert!(
             matches!(err, Error::Session(ref msg) if msg.contains("message_count exceeds SQLite INTEGER range")),
@@ -2766,7 +2783,7 @@ mod tests {
 
             let mut header = make_header(&id, &cwd);
             header.timestamp = timestamp.clone();
-            let index_result = index.index_session_snapshot(&path, &header, message_count, name.clone());
+            let index_result = index.index_session_snapshot(&path, &header, message_count, name.clone(), "(no messages)".to_string(), 0);
             if message_count > i64::MAX as u64 {
                 prop_assert!(
                     index_result.is_err(),
