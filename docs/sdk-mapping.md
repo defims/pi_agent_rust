@@ -130,18 +130,19 @@ pi-web-rust wires this via `pi::sdk::SessionIndex` + `pi::sdk::SessionMeta` + `p
 | `settingsManager` (readonly) | none | ❌ missing settings manager |
 | `modelRuntime` (readonly) | `agent.model_registry()` / `agent.auth_storage()` | ✅ pub getters added |
 
-## 9. Extension system (⏭️ architectural difference)
+## 9. Extension system (✅ wired 2026-08-20/22)
 
-The TS SDK has a full extension system (pi extensions); Rust has another implementation that
-also goes by "extensions" but with a different interface.
-pi-web's skills/plugins/custom-ui all ride on this layer.
+The TS SDK embeds DefaultResourceLoader (skills/extensions auto-load); the Rust port
+left it in the CLI layer — our fork closed the gap from both ends (web wire + SDK
+auto-load), and the custom-UI poll protocol made `extension_ui_input` a thin wrapper
+over `respond_ui`.
 
 | TS SDK | Rust | Status |
 |---|---|---|
-| `extensionRunner` (readonly) | `extension_manager()` / `has_extensions()` | ⏭️ Rust has it but the interface differs |
-| `promptTemplates` (readonly) | none | ⏭️ |
-| `resourceLoader` (readonly) | none | ⏭️ |
-| `bindExtensions?` | none | ⏭️ |
+| `extensionRunner` (readonly) | `extension_manager()` / `has_extensions()` | ✅ wired (UI channel + tools/commands RPC live in picrab-web) |
+| `promptTemplates` (readonly) | `get_commands()` 三源之一(load_prompt_templates) | ✅ |
+| `resourceLoader` (readonly) | auto-load:skills 四源(`f74dd3a8`)+ 扩展自动发现(`88abc5f1`, `SessionOptions::no_extensions`) | ✅ |
+| `bindExtensions?` | `enable_extensions_with_policy`(显式路径注入面) | ✅ |
 
 ---
 
@@ -157,22 +158,27 @@ names or serve Rust-native wiring; additive, not counted in alignment.
 
 | Category | Total | ✅ aligned | ❌ gap |
 |---|---|---|---|
-| Session core | 16 | 12 | 4 (steer / followUp / isStreaming / isCompacting) |
-| Stats/bash/compaction | 6 | 5 | 1 (autoCompactionEnabled getter) |
-| Queue management | 4 | 0 | 4 |
-| Tool management | 3 | 0 | 3 |
-| Navigation | 1 | 0 | 1 |
-| Bash helpers | 2 | 0 | 2 |
-| Compaction/retry/context | 4 | 0 | 4 |
-| Settings/model | 2 | 1 | 1 |
-| Extensions (architectural) | 4 | — | ⏭️ skipped |
-| **Total** | **42** | **18** | **20** |
+| Session core | 16 | 14 | 2 (isStreaming / isCompacting — snap 侧已有,SDK getter 待加) |
+| Stats/bash/compaction | 6 | 6 | 0 (compact 现返 CompactionResultInfo 统计) |
+| Queue management | 4 | 3 | 1 (set_steering_mode/set_follow_up_mode 已有;queue 查询 getter 待加) |
+| Tool management | 3 | 2 | 1 (`Agent::tools()` + extension_tool_defs;`setTools` 走 rpc 面) |
+| Navigation | 1 | 1 | 0 (`fork`/`switch_session`) |
+| Bash helpers | 2 | 2 | 0 (`bash`/`abort_bash`) |
+| Compaction/retry/context | 4 | 4 | 0 (`set_auto_retry`/`set_auto_compaction`/`abort_retry`/`continue_turn`) |
+| Settings/model | 2 | 2 | 0 |
+| Extensions | 4 | 4 | 0 |
+| **Total** | **42** | **38** | **4** |
 
-**Aligned rate: 47%** (18/38 counted items; extension-system items excluded as architectural).
+**Aligned rate: 90%** (38/42;剩余 4 项为 getter 型小面,均有运行时等价物在 picrab-web snap 层)。
 
 ## Fork fill log (defims/picrab)
 
 | commit | methods | TS SDK aligned |
+| `f74dd3a8` | SessionOptions::skills + auto-load | resourceLoader (skills half) |
+| `0f6d283a` | compact → CompactionResultInfo{tokensBefore/estimatedTokensAfter/...}; AgentSession::shutdown(flush+扩展停) | compact stats / dispose semantics |
+| `88abc5f1` | SessionOptions::no_extensions + discover_extensions_blocking 自动装配 | resourceLoader (extensions half) |
+| `213b7c80` | Agent::tools() | getTools 面 |
+| `7a2a023d` | (session_index) 索引快照 first_message/modified 真值 | SessionManager.listAll 元数据 |
 |---|---|---|
 | `e178fb48` | get_session_stats / get_last_assistant_text / set_auto_compaction / compact_with_instructions | getSessionStats / getLastAssistantText / setAutoCompactionEnabled / compact |
 | `52d39dc3` | bash | executeBash |
